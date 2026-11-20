@@ -33,29 +33,30 @@ Sentry is optional. Copy `.env.example` to `.env.local` and fill in the values y
 | --- | --- | --- |
 | `NEXT_PUBLIC_SENTRY_DSN` | No | Browser Sentry DSN. Inlined when the app is built. |
 | `SENTRY_DSN` | No | Server and edge Sentry DSN. Falls back to `NEXT_PUBLIC_SENTRY_DSN`. |
-| `SENTRY_AUTH_TOKEN` | No | Auth token for source map upload during `next build`. |
-| `SENTRY_ORG` | No | Sentry organization slug. Needed to upload source maps. |
-| `SENTRY_PROJECT` | No | Sentry project slug. Needed to upload source maps. |
-| `VERCEL_GIT_COMMIT_SHA` | No | Release name sent to Sentry. Vercel sets this on deploy. |
+| `SENTRY_AUTH_TOKEN` | No | Auth token for source map upload and release creation during `next build`. |
+| `SENTRY_ORG` | No | Sentry organization slug. Defaults to `eurodelices`. |
+| `SENTRY_PROJECT` | No | Sentry project slug. Defaults to `sentry-autofix-demo`. |
+| `SENTRY_ENVIRONMENT` | No | Event environment. Overrides `VERCEL_ENV` when set. |
+| `VERCEL_ENV` | No | Event environment on Vercel (`production`, `preview`, or `development`). Vercel sets this. |
+| `VERCEL_GIT_COMMIT_SHA` | No | Sentry release name. Vercel sets this. The build plugin injects it into the SDK. |
+| `SENTRY_DEBUG` | No | Set to `true` to log SDK activity, including envelope delivery. |
 
-Source map upload runs only when `SENTRY_AUTH_TOKEN`, `SENTRY_ORG`, and `SENTRY_PROJECT` are all set. Otherwise the build skips the upload and still succeeds.
+Source map upload, release creation, commit association, and deploy tracking run only when `SENTRY_AUTH_TOKEN` is set. Otherwise the build skips them and still succeeds. Uploaded source maps are deleted from the build output. The SDK and the build plugin both use `VERCEL_GIT_COMMIT_SHA` as the release name. When that variable is absent, the plugin falls back to the git commit SHA.
 
 ## Deploy on Vercel
 
 The repo is a standard Next.js app. Vercel detects it with no extra build settings.
 
 1. Import the GitHub repository at [vercel.com/new](https://vercel.com/new). Leave the framework preset on Next.js and the default build command (`next build`) and output.
-2. In [Sentry](https://sentry.io), create a project and choose the Next.js platform.
+2. The Sentry project is `sentry-autofix-demo` in the `eurodelices` organization (US region). Those slugs are the defaults in `next.config.ts`.
 3. In the Vercel project, open **Settings → Environment Variables** and add:
-   - `NEXT_PUBLIC_SENTRY_DSN` — the client DSN from the Sentry project
+   - `NEXT_PUBLIC_SENTRY_DSN` — the client DSN
    - `SENTRY_DSN` — the same DSN, or a separate server DSN
-   - `SENTRY_ORG` — the organization slug
-   - `SENTRY_PROJECT` — the project slug
-   - `SENTRY_AUTH_TOKEN` — a Sentry auth token with `project:releases` and `org:read` scopes
-4. Leave `VERCEL_GIT_COMMIT_SHA` unset. Vercel provides it, and the app uses that value as the Sentry release.
-5. Deploy. Later deploys upload source maps when the three upload variables are present.
+   - `SENTRY_AUTH_TOKEN` — an organization auth token with `project:releases` and `org:read`
+4. Leave `SENTRY_ORG`, `SENTRY_PROJECT`, `VERCEL_ENV`, and `VERCEL_GIT_COMMIT_SHA` unset unless you need to override them. Vercel provides `VERCEL_ENV` and `VERCEL_GIT_COMMIT_SHA`. The build uses the commit SHA as the Sentry release and `VERCEL_ENV` as the environment.
+5. Deploy. With the auth token set, the build uploads source maps, creates the release, associates commits, and records the deploy.
 
-Events show up in Sentry after a production deploy that was built with the DSN set. Client events need `NEXT_PUBLIC_SENTRY_DSN` at build time, so change that variable and redeploy rather than only restarting.
+Events show up in Sentry after a deploy that was built with the DSN set. Client events need `NEXT_PUBLIC_SENTRY_DSN` at build time, so change that variable and redeploy rather than only restarting. Server events read `SENTRY_DSN` at runtime.
 
 ## Continuous integration
 
