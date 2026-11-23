@@ -1,0 +1,132 @@
+{
+  "action": "triggered",
+  "actor": {
+    "id": "sentry",
+    "name": "Sentry",
+    "type": "application"
+  },
+  "data": {
+    "event": {
+      "_ref": 1,
+      "_ref_version": 2,
+      "contexts": {
+        "browser": {
+          "name": "Chrome",
+          "type": "browser",
+          "version": "120.0.0"
+        },
+        "os": {
+          "name": "Linux",
+          "type": "os",
+          "version": "6.8.0"
+        }
+      },
+      "culprit": "POST /api/quote",
+      "datetime": "2026-11-23T09:00:00.000000Z",
+      "dist": null,
+      "event_id": "e4874d664c3540c1a32eab185f12c5ab",
+      "exception": {
+        "values": [
+          {
+            "mechanism": {
+              "handled": false,
+              "type": "generic"
+            },
+            "stacktrace": {
+              "frames": [
+                {
+                  "abs_path": "/var/task/node_modules/next/dist/server/route-modules/app-route/module.js",
+                  "colno": 12,
+                  "context_line": "return handler(request);",
+                  "filename": "node_modules/next/dist/server/route-modules/app-route/module.js",
+                  "function": "doRender",
+                  "in_app": false,
+                  "lineno": 210,
+                  "module": "next.dist.server.route-modules.app-route.module",
+                  "vars": null
+                },
+                {
+                  "abs_path": "/var/task/lib/pricing.ts",
+                  "colno": 18,
+                  "context_line": "  return { label: zone.label, cents: zone.cents };",
+                  "filename": "lib/pricing.ts",
+                  "function": "deliveryFor",
+                  "in_app": true,
+                  "lineno": 50,
+                  "module": "lib.pricing",
+                  "vars": {
+                    "postalCode": "10001",
+                    "subtotal": 1800,
+                    "zone": null
+                  }
+                }
+              ]
+            },
+            "type": "TypeError",
+            "value": "Cannot read properties of undefined (reading 'label')"
+          }
+        ]
+      },
+      "fingerprint": ["{{ default }}"],
+      "issue_id": "482910331",
+      "issue_url": "https://us.sentry.io/api/0/issues/482910331/",
+      "key_id": "667532",
+      "level": "error",
+      "location": "lib/pricing.ts",
+      "logger": "",
+      "message": "",
+      "metadata": {
+        "filename": "lib/pricing.ts",
+        "function": "deliveryFor",
+        "type": "TypeError",
+        "value": "Cannot read properties of undefined (reading 'label')"
+      },
+      "platform": "node",
+      "project": 1,
+      "received": 1763895600.0,
+      "release": "1.0.0-demo",
+      "request": {
+        "cookies": null,
+        "data": {
+          "lines": [{ "sku": "kenya", "quantity": 1 }],
+          "postalCode": "10001"
+        },
+        "env": null,
+        "fragment": null,
+        "headers": [
+          ["Content-Type", "application/json"],
+          ["User-Agent", "sentry-autofix-demo"]
+        ],
+        "inferred_content_type": "application/json",
+        "method": "POST",
+        "query_string": [],
+        "url": "https://sentry-autofix-demo.vercel.app/api/quote"
+      },
+      "tags": [
+        ["browser", "Chrome 120.0.0"],
+        ["environment", "production"],
+        ["handled", "no"],
+        ["level", "error"],
+        ["url", "https://sentry-autofix-demo.vercel.app/api/quote"]
+      ],
+      "time_spent": null,
+      "timestamp": 1763895600.0,
+      "title": "TypeError: Cannot read properties of undefined (reading 'label')",
+      "type": "error",
+      "url": "https://us.sentry.io/api/0/projects/eurodelices/sentry-autofix-demo/events/e4874d664c3540c1a32eab185f12c5ab/",
+      "user": {
+        "ip_address": "203.0.113.10"
+      },
+      "version": "7",
+      "web_url": "https://eurodelices.sentry.io/issues/482910331/events/e4874d664c3540c1a32eab185f12c5ab/"
+    },
+    "triggered_rule": "New issue in sentry-autofix-demo",
+    "issue_alert": {
+      "title": "New issue in sentry-autofix-demo",
+      "settings": []
+    }
+  },
+  "installation": {
+    "uuid": "a8e5d37a-696c-4c54-adb5-b3f28d64c7de"
+  }
+}
