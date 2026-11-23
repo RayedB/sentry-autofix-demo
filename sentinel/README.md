@@ -14,7 +14,7 @@ npx @grok/agent-sdk login
 npx @grok/agent-sdk whoami
 ```
 
-Connect GitHub for `RayedB/sentry-autofix-demo` in Cursor (Settings or https://cursor.com/dashboard) before you rely on `create_github_issue`. `ctx.host.github.getOctokit()` uses that connection when a `githubChannel({ cursorAccount })` is mounted. This project does not mount one: mounting it makes `agent-sdk dev` refuse to listen until login, because the SDK treats the channel repos as cursor-events scope. Without that channel, Octokit uses `GITHUB_TOKEN`, `GH_TOKEN`, or `gh auth token`. On Cursor hosting, set one of those if issue creation returns an auth error, or add the channel after you confirm `dev` still starts.
+Connect GitHub for `RayedB/sentry-autofix-demo` in Cursor (Settings or https://cursor.com/dashboard). `bot/channels/github.ts` mounts `githubChannel({ cursorAccount })`. With that mount, `ctx.host.github.getOctokit()` uses the Cursor GitHub connection. The channel returns null for pull requests, issues, and comments, so those events do not start a turn. `permissions` is `pr-write`, the documented tier for issue and comment writes. Local `dev` needs `agent-sdk login` before it listens, because the channel's repos are cursor-events scope.
 
 ## Set secrets
 
@@ -42,10 +42,11 @@ Commit and push this directory first. `deploy` builds the pushed git ref. From t
 ```bash
 npx @grok/agent-sdk login
 npx @grok/agent-sdk validate --dir sentinel
-npx @grok/agent-sdk deploy --dir sentinel
+npx @grok/agent-sdk deploy --dir sentinel \
+  --cursor-events-repo RayedB/sentry-autofix-demo
 ```
 
-The command prints `alias:`. That value is `AGENT_ALIAS_URL`. The first deploy also prints an alias token once. Store it in a password manager. Sentry does not send that token.
+Pass `--cursor-events-repo` on every deploy. A deploy replaces the repositories the deployment watches, and the GitHub channel uses that list together with the repos in `cursorAccount`. The command prints `alias:`. That value is `AGENT_ALIAS_URL`. A later deploy does not print the alias token again.
 
 Manage the deployment at https://cursor.com/dashboard/deployed-agents.
 
