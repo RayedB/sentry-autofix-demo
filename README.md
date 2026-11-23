@@ -41,7 +41,7 @@ Sentry is optional. Copy `.env.example` to `.env.local` and fill in the values y
 | `VERCEL_GIT_COMMIT_SHA` | No | Sentry release name. Vercel sets this. The build plugin injects it into the SDK. |
 | `SENTRY_DEBUG` | No | Set to `true` to log SDK activity, including envelope delivery. |
 
-Source map upload, release creation, commit association, and deploy tracking run only when `SENTRY_AUTH_TOKEN` is set. Otherwise the build skips them and still succeeds. Uploaded source maps are deleted from the build output. The SDK and the build plugin both use `VERCEL_GIT_COMMIT_SHA` as the release name. When that variable is absent, the plugin falls back to the git commit SHA.
+`next build` prints `[sentry-config] auth token present: ...` and Sentry plugin debug logs. Source map upload, release finalization, commit association, and deploy tracking run in `postbuild` only when `SENTRY_AUTH_TOKEN` is set. Without the token that step logs the same line with `false` and exits successfully. Uploaded source maps are then removed from `.next`. The release name is `VERCEL_GIT_COMMIT_SHA`.
 
 ## Deploy on Vercel
 
@@ -54,7 +54,7 @@ The repo is a standard Next.js app. Vercel detects it with no extra build settin
    - `SENTRY_DSN` — the same DSN, or a separate server DSN
    - `SENTRY_AUTH_TOKEN` — an organization auth token with `project:releases` and `org:read`
 4. Leave `SENTRY_ORG`, `SENTRY_PROJECT`, `VERCEL_ENV`, and `VERCEL_GIT_COMMIT_SHA` unset unless you need to override them. Vercel provides `VERCEL_ENV` and `VERCEL_GIT_COMMIT_SHA`. The build uses the commit SHA as the Sentry release and `VERCEL_ENV` as the environment.
-5. Deploy. With the auth token set, the build uploads source maps, creates the release, associates commits, and records the deploy.
+5. Deploy with the default build script (`npm run build`), which runs `postbuild`. With the auth token set, look for `[sentry-config] auth token present: true` and `sentry-cli` source map upload lines. The plugin's `compiler.runAfterProductionCompile` hook does not run for `next build --experimental-build-mode generate`, which is why upload also happens after the build.
 
 Events show up in Sentry after a deploy that was built with the DSN set. Client events need `NEXT_PUBLIC_SENTRY_DSN` at build time, so change that variable and redeploy rather than only restarting. Server events read `SENTRY_DSN` at runtime.
 
