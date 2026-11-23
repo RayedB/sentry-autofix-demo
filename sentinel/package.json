@@ -1,0 +1,21 @@
+{
+  "name": "sentinel",
+  "private": true,
+  "type": "module",
+  "description": "Sentry issue-alert agent that files a GitHub repro issue and launches a failing-test cloud agent.",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "dev": "agent-sdk dev"
+  },
+  "dependencies": {
+    "@grok/agent-sdk": "^0.7.2",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "typescript": "6.0.3"
+  }
+}
