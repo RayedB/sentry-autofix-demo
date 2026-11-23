@@ -24,6 +24,17 @@ describe("priceQuote", () => {
     });
   });
 
+  it("prices a one-bag order to postal code 10001", () => {
+    const quote = priceQuote({
+      lines: [{ sku: "ethiopia", quantity: 1 }],
+      postalCode: "10001",
+    });
+
+    expect(quote.subtotal).toBe(1900);
+    expect(quote.deliveryLabel).toEqual(expect.any(String));
+    expect(quote.delivery).toEqual(expect.any(Number));
+  });
+
   it("waives delivery once the order reaches $75", () => {
     const quote = priceQuote({
       lines: [
