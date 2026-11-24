@@ -3,12 +3,17 @@ import { isRecord, readNumber, readString } from "./json.js";
 
 export type FixPhase = "active" | "merged" | "stopped";
 
+export type PendingSince = { sha: string; at: string };
+
 export type FixRecord = {
   prNumber: number;
   reproSha: string;
   attempts: number;
   agentId: string | null;
+  /** Head SHA the current cloud-agent attempt was launched against. */
+  attemptSha: string | null;
   lastFailure: string | null;
+  pendingSince: PendingSince | null;
   phase: FixPhase;
 };
 
@@ -39,9 +44,23 @@ export function parseFixRecord(value: unknown): FixRecord | null {
     reproSha,
     attempts,
     agentId: readString(value, "agentId"),
+    attemptSha: readString(value, "attemptSha"),
     lastFailure: typeof value.lastFailure === "string" ? value.lastFailure : null,
+    pendingSince: pendingSince(value.pendingSince),
     phase,
   };
+}
+
+function pendingSince(value: unknown): PendingSince | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const sha = readString(value, "sha");
+  const at = readString(value, "at");
+  if (sha === null || at === null) {
+    return null;
+  }
+  return { sha, at };
 }
 
 export function toJson(record: FixRecord): JsonValue {
@@ -50,7 +69,9 @@ export function toJson(record: FixRecord): JsonValue {
     reproSha: record.reproSha,
     attempts: record.attempts,
     agentId: record.agentId,
+    attemptSha: record.attemptSha,
     lastFailure: record.lastFailure,
+    pendingSince: record.pendingSince,
     phase: record.phase,
   };
 }

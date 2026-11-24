@@ -10,15 +10,20 @@ export default defineSchedule({
     const github = githubFromOctokit(await host.github.getOctokit());
     const pulls = await github.listOpenPulls();
     for (const pull of pulls) {
-      await tick(
-        {
-          kv: host.kv,
-          github,
-          getAgent: (agentId) => getCloudAgent(agentId),
-          launch: (input) => launchWith(callTool, input),
-        },
-        pull,
-      );
+      try {
+        await tick(
+          {
+            kv: host.kv,
+            github,
+            getAgent: (agentId) => getCloudAgent(agentId),
+            launch: (input) => launchWith(callTool, input),
+          },
+          pull,
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "tick failed";
+        console.error(`fixer tick #${pull.number}: ${message}`);
+      }
     }
   },
 });

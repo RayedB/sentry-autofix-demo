@@ -36,7 +36,7 @@ export async function checkPreview(input: {
     return version;
   }
   if (version.status !== 200) {
-    return { kind: "pending", reason: `GET /api/version returned ${version.status}.` };
+    return { kind: "pending", reason: pendingHttpReason("GET", VERSION_PATH, version.status, version.raw) };
   }
   const sha = versionSha(version.body);
   if (sha === null || sha !== input.headSha) {
@@ -53,7 +53,17 @@ export async function checkPreview(input: {
   if (quote.kind === "pending") {
     return quote;
   }
+  if (quote.status === 401 || quote.status === 404) {
+    return { kind: "pending", reason: pendingHttpReason("POST", QUOTE_PATH, quote.status, quote.raw) };
+  }
   return judgeQuote(quote.status, quote.body, quote.raw);
+}
+
+function pendingHttpReason(method: string, path: string, status: number, raw: string): string {
+  if (status === 401) {
+    return `${method} ${path} returned 401. Set ${VERCEL_BYPASS_SECRET_NAME}.`;
+  }
+  return `${method} ${path} returned ${status}. ${clip(raw)}`;
 }
 
 function versionSha(body: unknown): string | null {

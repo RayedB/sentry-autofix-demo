@@ -24,6 +24,10 @@ export default defineTool({
   inputSchema,
   dryRunResult: (): LaunchFixResult => ({ agentId: "", url: "" }),
   async execute(input, ctx): Promise<LaunchFixResult> {
+    const allowed = `${GITHUB_REPO_URL}/pull/`;
+    if (!input.prUrl.startsWith(allowed)) {
+      throw new Error(`prUrl must start with ${allowed}`);
+    }
     const agentId = fixAgentId(input.prNumber, input.headSha, input.attempt);
     const launched = await launchCloudAgent(ctx, {
       prompt: fixPrompt(input),

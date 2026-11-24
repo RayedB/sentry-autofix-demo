@@ -12,4 +12,6 @@ export default githubChannel({
   // docs/guides/github.md and GitHubChannelOptions.onPullRequest: with no hook,
   // opened / synchronize / reopened / ready_for_review start a model turn.
   onPullRequest: () => null,
+  // types.d.ts GitHubCommentHook: the default @mention gate starts a model turn.
+  onComment: () => null,
 });

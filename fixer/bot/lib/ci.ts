@@ -7,7 +7,13 @@ export type CiState = "success" | "failure" | "pending";
 
 const FAILED_CONCLUSIONS = new Set(["failure", "timed_out", "cancelled", "action_required", "stale"]);
 
-type Run = { name: string; status: string; conclusion: string | null };
+type Run = {
+  name: string;
+  status: string;
+  conclusion: string | null;
+  title: string | null;
+  summary: string | null;
+};
 type Status = { context: string; state: string };
 
 /** One `checks.listForRef` body and one `listCommitStatusesForRef` body. */
@@ -47,6 +53,17 @@ export function classifyCi(checkRunsPayload: unknown, statusesPayload: unknown):
   return "success";
 }
 
+/** Titles and summaries from check runs that failed. */
+export function failingCheckText(checkRunsPayload: unknown): string {
+  return checkRuns(checkRunsPayload)
+    .filter((run) => run.conclusion !== null && FAILED_CONCLUSIONS.has(run.conclusion))
+    .map((run) => {
+      const detail = [run.title, run.summary].filter((part): part is string => part !== null && part !== "").join("\n");
+      return detail === "" ? `${run.name}: ${run.conclusion}` : `${run.name}: ${run.conclusion}\n${detail}`;
+    })
+    .join("\n\n");
+}
+
 function checkRuns(payload: unknown): Run[] {
   const list = isRecord(payload) && Array.isArray(payload.check_runs) ? payload.check_runs : [];
   return list.flatMap((item) => {
@@ -57,7 +74,16 @@ function checkRuns(payload: unknown): Run[] {
     if (name === null) {
       return [];
     }
-    return [{ name, status: readString(item, "status") ?? "queued", conclusion: readString(item, "conclusion") }];
+    const output = isRecord(item.output) ? item.output : {};
+    return [
+      {
+        name,
+        status: readString(item, "status") ?? "queued",
+        conclusion: readString(item, "conclusion"),
+        title: readString(output, "title"),
+        summary: readString(output, "summary"),
+      },
+    ];
   });
 }
 

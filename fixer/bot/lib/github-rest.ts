@@ -1,6 +1,6 @@
 import { GITHUB_OWNER, GITHUB_REPO } from "./github.js";
 import { isRecord, readNumber, readString } from "./json.js";
-import type { GitHub, OpenPull } from "./tick.js";
+import type { ComparedFile, GitHub, OpenPull } from "./tick.js";
 
 type Params = Record<string, string | number>;
 type RestCall = (params: Params) => Promise<{ data: unknown }>;
@@ -67,7 +67,7 @@ async function readPull(rest: Rest, number: number): Promise<OpenPull> {
   return pull;
 }
 
-async function compareFiles(rest: Rest, base: string, head: string): Promise<string[]> {
+async function compareFiles(rest: Rest, base: string, head: string): Promise<ComparedFile[]> {
   const { data } = await rest.repos.compareCommitsWithBasehead({
     owner: GITHUB_OWNER,
     repo: GITHUB_REPO,
@@ -76,7 +76,16 @@ async function compareFiles(rest: Rest, base: string, head: string): Promise<str
   if (!isRecord(data) || !Array.isArray(data.files)) {
     return [];
   }
-  return data.files.flatMap((file) => (isRecord(file) && readString(file, "filename") !== null ? [readString(file, "filename") as string] : []));
+  return data.files.flatMap((file) => {
+    if (!isRecord(file)) {
+      return [];
+    }
+    const path = readString(file, "filename");
+    if (path === null) {
+      return [];
+    }
+    return [{ path, sha: readString(file, "sha"), status: readString(file, "status") ?? "modified" }];
+  });
 }
 
 function pullFrom(value: unknown): OpenPull | null {

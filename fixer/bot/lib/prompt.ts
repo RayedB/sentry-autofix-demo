@@ -3,7 +3,8 @@ import { QUOTE_REQUEST } from "./preview.js";
 export function fixPrompt(input: { prUrl: string; headSha: string; attempt: number; failure: string | null }): string {
   const failure = input.failure === null || input.failure.trim() === "" ? "No earlier attempt failed." : input.failure.trim().slice(0, 4000);
   return [
-    "Fix the production bug on this existing pull request.",
+    "First, merge origin/main into this branch so the preview serves GET /api/version.",
+    "Then fix the production bug on this existing pull request.",
     `Pull request: ${input.prUrl}`,
     `Push every commit onto that same branch. The pull request already exists.`,
     `Attempt ${input.attempt} of 3. Current head ${input.headSha}.`,
