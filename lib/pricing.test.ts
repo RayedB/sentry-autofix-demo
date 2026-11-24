@@ -38,6 +38,16 @@ describe("priceQuote", () => {
     expect(quote.delivery).toBe(0);
     expect(quote.total).toBe(7500);
   });
+
+  it("prices delivery for a postal prefix outside known zones", () => {
+    const quote = priceQuote({
+      lines: [{ sku: "ethiopia", quantity: 1 }],
+      postalCode: "10001",
+    });
+
+    expect(typeof quote.deliveryLabel).toBe("string");
+    expect(typeof quote.delivery).toBe("number");
+  });
 });
 
 describe("parseQuoteRequest", () => {
