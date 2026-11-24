@@ -7,7 +7,7 @@ export default cursorCloudAgents({
     autoCreatePR: false,
   },
   needsApproval: false,
-  channels: ["github", "direct"],
+  channels: ["direct"],
   refuseSession: (session) =>
     session.purpose === "eval" ? "Eval sessions do not launch cloud agents." : undefined,
 });

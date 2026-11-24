@@ -1,18 +1,42 @@
 import { defineSchedule } from "@grok/agent-sdk/schedules";
-import { syncOpen } from "../lib/host-sync.js";
-import { setCallTool } from "../lib/runtime.js";
+import { getCloudAgent } from "@grok/agent-sdk/extensions/cursor-cloud-agents";
+import { githubFromOctokit } from "../lib/github-rest.js";
+import { tick, type LaunchInput } from "../lib/tick.js";
 
-// GitHub does not replay a check_suite that failed before this agent was
-// deployed. This scan notices an already-failing repro pull request.
+// docs/reference/schedules.md — run receives callTool and host. Every two minutes.
 export default defineSchedule({
-  cron: "* * * * *",
+  cron: "*/2 * * * *",
   async run({ host, callTool }) {
-    const caller = (name: string, input: { prNumber: number; attempt: number; headSha: string }) => callTool(name, input);
-    setCallTool(caller);
-    await syncOpen({
-      getOctokit: () => host.github.getOctokit(),
-      kv: host.kv,
-      callTool: caller,
-    });
+    const github = githubFromOctokit(await host.github.getOctokit());
+    const pulls = await github.listOpenPulls();
+    for (const pull of pulls) {
+      await tick(
+        {
+          kv: host.kv,
+          github,
+          getAgent: (agentId) => getCloudAgent(agentId),
+          launch: (input) => launchWith(callTool, input),
+        },
+        pull,
+      );
+    }
   },
 });
+
+async function launchWith(
+  callTool: (name: string, input?: unknown) => Promise<{ isError: boolean; errorMessage?: string; result: unknown }>,
+  input: LaunchInput,
+): Promise<{ agentId: string }> {
+  const outcome = await callTool("launch_fix", input);
+  if (outcome.isError) {
+    throw new Error(outcome.errorMessage ?? "launch_fix failed");
+  }
+  if (typeof outcome.result !== "object" || outcome.result === null || !("agentId" in outcome.result)) {
+    throw new Error("launch_fix did not return an agent id.");
+  }
+  const agentId = outcome.result.agentId;
+  if (typeof agentId !== "string" || agentId === "") {
+    throw new Error("launch_fix did not return an agent id.");
+  }
+  return { agentId };
+}

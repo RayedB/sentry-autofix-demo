@@ -1,22 +1,13 @@
-/** Body line and label sentinel asks the repro cloud agent to add. */
-export const REPRO_MARKER = "sentry-repro";
+import { GITHUB_FULL_NAME } from "./github.js";
 
-const BRANCH_PREFIXES = ["cursor/repro-", "repro/"] as const;
+export const REPRO_LABEL = "sentry-repro";
 
-export function isReproRef(ref: string): boolean {
-  return BRANCH_PREFIXES.some((prefix) => ref.startsWith(prefix));
-}
-
-export function isReproPull(input: {
-  ref: string;
-  body: string;
-  labels: readonly string[];
-}): boolean {
-  if (isReproRef(input.ref)) {
+export function isReproPull(input: { repoFullName: string; ref: string; labels: readonly string[] }): boolean {
+  if (input.repoFullName !== GITHUB_FULL_NAME) {
+    return false;
+  }
+  if (input.labels.includes(REPRO_LABEL)) {
     return true;
   }
-  if (input.labels.includes(REPRO_MARKER)) {
-    return true;
-  }
-  return input.body.includes(REPRO_MARKER);
+  return input.ref.startsWith("cursor/repro-") || input.ref.startsWith("repro/");
 }

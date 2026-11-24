@@ -1,258 +1,113 @@
 import { isRecord, readString } from "./json.js";
 
 export const QUOTE_PATH = "/api/quote";
+export const VERSION_PATH = "/api/version";
 export const VERCEL_BYPASS_SECRET_NAME = "VERCEL_AUTOMATION_BYPASS_SECRET";
-export const VERCEL_BYPASS_HEADER = "x-vercel-protection-bypass";
+const VERCEL_BYPASS_HEADER = "x-vercel-protection-bypass";
 
 export const QUOTE_REQUEST = {
   lines: [{ sku: "ethiopia", quantity: 1 }],
   postalCode: "10001",
 } as const;
 
-export const QUOTE_REQUEST_JSON = JSON.stringify(QUOTE_REQUEST);
+const QUOTE_REQUEST_JSON = JSON.stringify(QUOTE_REQUEST);
+const PROJECT = "sentry-autofix-demo";
+const TEAM = "rayeds-projects";
 
-const VERCEL_PROJECT = "sentry-autofix-demo";
-const VERCEL_TEAM = "rayeds-projects";
+export type PreviewVerdict = { kind: "ok" } | { kind: "pending"; reason: string } | { kind: "fail"; reason: string };
 
-export type DeployState = "success" | "failure" | "pending";
-
-export type PreviewHit = {
-  sha: string;
-  state: DeployState;
-  url: string | null;
-  preview: boolean;
-};
-
-export type QuoteVerdict =
-  | { ok: true; deliveryLabel: string; delivery: number }
-  | { ok: false; status: number; reason: string; body: string };
-
-export function vercelPreviewUrl(value: string | null | undefined): string | null {
-  if (value === null || value === undefined || value.trim() === "") {
-    return null;
-  }
-  let parsed: URL;
-  try {
-    parsed = new URL(value.trim());
-  } catch {
-    return null;
-  }
-  if (parsed.protocol !== "https:" || parsed.username !== "" || parsed.password !== "") {
-    return null;
-  }
-  const host = parsed.hostname.toLowerCase();
-  if (!isPreviewHost(host)) {
-    return null;
-  }
-  return `https://${host}`;
-}
-
-export function isPreviewHost(hostname: string): boolean {
-  return hostname.endsWith(".vercel.app") && hostname.includes("-git-");
-}
-
-/** Vercel branch alias. `cursor/repro-6-1efe` -> the preview host used for that branch. */
 export function branchPreviewUrl(branch: string): string {
-  const slug = branch
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return `https://${VERCEL_PROJECT}-git-${slug}-${VERCEL_TEAM}.vercel.app`;
+  const slug = branch.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return `https://${PROJECT}-git-${slug}-${TEAM}.vercel.app`;
 }
 
-export function resolvePreviewUrl(hit: { state: DeployState; url: string | null }, branch: string): string | null {
-  if (hit.url !== null) {
-    return hit.url;
+export async function checkPreview(input: {
+  branch: string;
+  headSha: string;
+  fetchImpl?: typeof fetch;
+}): Promise<PreviewVerdict> {
+  const fetchImpl = input.fetchImpl ?? fetch;
+  const origin = branchPreviewUrl(input.branch);
+  const version = await request(fetchImpl, new URL(VERSION_PATH, origin), { method: "GET" });
+  if (version.kind === "redirect") {
+    return { kind: "fail", reason: `GET /api/version redirected (${version.status}).` };
   }
-  if (hit.state !== "success") {
-    return null;
+  if (version.kind === "pending") {
+    return version;
   }
-  const fallback = branchPreviewUrl(branch);
-  return vercelPreviewUrl(fallback);
-}
-
-export function previewFromParts(input: {
-  sha: string;
-  state: string;
-  environment?: string | null;
-  production?: boolean;
-  environmentUrl?: string | null;
-  targetUrl?: string | null;
-}): PreviewHit | null {
-  const sha = input.sha.trim();
-  if (sha === "") {
-    return null;
+  if (version.status !== 200) {
+    return { kind: "pending", reason: `GET /api/version returned ${version.status}.` };
   }
-  const state = mapDeployState(input.state);
-  if (state === null) {
-    return null;
+  const sha = versionSha(version.body);
+  if (sha === null || sha !== input.headSha) {
+    return { kind: "pending", reason: `Preview SHA ${sha ?? "missing"} is not head ${input.headSha}.` };
   }
-  const url = vercelPreviewUrl(input.environmentUrl) ?? vercelPreviewUrl(input.targetUrl);
-  const kind = environmentKind(input.environment ?? null, input.production === true);
-  return {
-    sha,
-    state,
-    url,
-    preview: kind === "preview" || (kind !== "production" && url !== null),
-  };
-}
-
-export function previewFromDeploymentStatusPayload(payload: unknown): PreviewHit | null {
-  if (!isRecord(payload) || !isRecord(payload.deployment) || !isRecord(payload.deployment_status)) {
-    return null;
-  }
-  const sha = readString(payload.deployment, "sha");
-  if (sha === null) {
-    return null;
-  }
-  const status = payload.deployment_status;
-  return previewFromParts({
-    sha,
-    state: readString(status, "state") ?? "pending",
-    environment: readString(status, "environment") ?? readString(payload.deployment, "environment"),
-    production:
-      payload.deployment.production_environment === true ||
-      payload.deployment_status.environment === "Production",
-    environmentUrl: readString(status, "environment_url"),
-    targetUrl: readString(status, "target_url"),
+  const quote = await request(fetchImpl, new URL(QUOTE_PATH, origin), {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: QUOTE_REQUEST_JSON,
   });
+  if (quote.kind === "redirect") {
+    return { kind: "fail", reason: `POST /api/quote redirected (${quote.status}).` };
+  }
+  if (quote.kind === "pending") {
+    return quote;
+  }
+  return judgeQuote(quote.status, quote.body, quote.raw);
 }
 
-export function deploymentSha(payload: unknown): string | null {
-  if (!isRecord(payload) || !isRecord(payload.deployment)) {
-    return null;
-  }
-  return readString(payload.deployment, "sha");
-}
-
-export function previewFromCommitStatus(input: {
-  sha: string;
-  state: string;
-  context: string;
-  targetUrl?: string | null;
-}): PreviewHit | null {
-  if (!/vercel/i.test(input.context)) {
-    return null;
-  }
-  return previewFromParts({
-    sha: input.sha,
-    state: input.state,
-    environment: "Preview",
-    targetUrl: input.targetUrl,
-  });
-}
-
-export function choosePreview(hits: readonly PreviewHit[]): PreviewHit | null {
-  const previews = hits.filter((hit) => hit.preview);
-  const ready = previews.find((hit) => hit.state === "success" && hit.url !== null);
-  if (ready !== undefined) {
-    return ready;
-  }
-  const failed = previews.find((hit) => hit.state === "failure");
-  if (failed !== undefined) {
-    return failed;
-  }
-  const pending = previews.find((hit) => hit.state === "pending" || hit.state === "success");
-  return pending ?? null;
-}
-
-export function isPreviewProtection(verdict: QuoteVerdict): boolean {
-  return !verdict.ok && verdict.status === 401 && verdict.body.includes("Protected deployment");
-}
-
-export function judgeQuoteResponse(status: number, body: unknown, raw = ""): QuoteVerdict {
-  if (status !== 200) {
-    return { ok: false, status, reason: `HTTP ${status}.`, body: clipBody(raw) };
-  }
+function versionSha(body: unknown): string | null {
   if (!isRecord(body)) {
-    return { ok: false, status, reason: "Response was not a JSON object.", body: clipBody(raw) };
+    return null;
+  }
+  return readString(body, "sha");
+}
+
+function judgeQuote(status: number, body: unknown, raw: string): PreviewVerdict {
+  if (status !== 200 || !isRecord(body)) {
+    return { kind: "fail", reason: `POST /api/quote returned ${status}. ${clip(raw)}` };
   }
   const deliveryLabel = readString(body, "deliveryLabel");
-  if (deliveryLabel === null) {
-    return { ok: false, status, reason: "Response has no delivery label.", body: clipBody(raw) };
+  if (deliveryLabel === null || typeof body.delivery !== "number" || !Number.isFinite(body.delivery)) {
+    return { kind: "fail", reason: `POST /api/quote returned 200 without a delivery label and numeric delivery. ${clip(raw)}` };
   }
-  const delivery = body.delivery;
-  if (typeof delivery !== "number" || !Number.isFinite(delivery)) {
-    return { ok: false, status, reason: "Response delivery is not a number.", body: clipBody(raw) };
-  }
-  return { ok: true, deliveryLabel, delivery };
+  return { kind: "ok" };
 }
 
-export async function verifyPreviewQuote(
-  previewUrl: string,
-  fetchImpl: typeof fetch = fetch,
-): Promise<QuoteVerdict> {
-  const origin = vercelPreviewUrl(previewUrl);
-  if (origin === null) {
-    return { ok: false, status: 0, reason: "Preview URL is not a Vercel preview host.", body: previewUrl };
-  }
-  const headers: Record<string, string> = {
-    accept: "application/json",
-    "content-type": "application/json",
-  };
+type FetchResult =
+  | { kind: "http"; status: number; body: unknown; raw: string }
+  | { kind: "redirect"; status: number }
+  | { kind: "pending"; reason: string };
+
+async function request(fetchImpl: typeof fetch, url: URL, init: RequestInit): Promise<FetchResult> {
+  const headers = new Headers(init.headers);
   const bypass = process.env[VERCEL_BYPASS_SECRET_NAME];
   if (bypass !== undefined && bypass.trim() !== "") {
-    headers[VERCEL_BYPASS_HEADER] = bypass.trim();
+    headers.set(VERCEL_BYPASS_HEADER, bypass.trim());
   }
-  const response = await fetchImpl(new URL(QUOTE_PATH, origin), {
-    method: "POST",
-    headers,
-    body: QUOTE_REQUEST_JSON,
-    redirect: "follow",
-    signal: AbortSignal.timeout(20_000),
-  });
+  let response: Response;
+  try {
+    response = await fetchImpl(url, { ...init, headers, redirect: "manual", signal: AbortSignal.timeout(20_000) });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "preview request failed";
+    return { kind: "pending", reason: message };
+  }
+  if (response.status >= 300 && response.status < 400) {
+    return { kind: "redirect", status: response.status };
+  }
   const raw = await response.text();
-  let parsed: unknown = raw;
+  let body: unknown = raw;
   if (raw.trim() !== "") {
     try {
-      parsed = JSON.parse(raw) as unknown;
+      body = JSON.parse(raw) as unknown;
     } catch {
-      parsed = raw;
+      body = raw;
     }
   }
-  return judgeQuoteResponse(response.status, parsed, raw);
+  return { kind: "http", status: response.status, body, raw };
 }
 
-function mapDeployState(state: string): DeployState | null {
-  switch (state) {
-    case "success":
-      return "success";
-    case "failure":
-    case "error":
-      return "failure";
-    case "inactive":
-      return null;
-    case "pending":
-    case "queued":
-    case "in_progress":
-    case "waiting":
-      return "pending";
-    default:
-      return "pending";
-  }
-}
-
-function environmentKind(environment: string | null, productionFlag: boolean): "preview" | "production" | "unknown" {
-  if (productionFlag) {
-    return "production";
-  }
-  if (environment === null) {
-    return "unknown";
-  }
-  const value = environment.toLowerCase();
-  if (value.includes("production")) {
-    return "production";
-  }
-  if (value.includes("preview")) {
-    return "preview";
-  }
-  return "unknown";
-}
-
-function clipBody(raw: string): string {
-  const trimmed = raw.trim();
-  if (trimmed.length <= 1500) {
-    return trimmed;
-  }
-  return `${trimmed.slice(0, 1500)}\n…`;
+function clip(text: string): string {
+  const trimmed = text.trim();
+  return trimmed.length <= 500 ? trimmed : `${trimmed.slice(0, 500)}…`;
 }

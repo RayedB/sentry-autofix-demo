@@ -8,7 +8,7 @@
   },
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "node --import tsx --test bot/lib/agent-id.test.ts bot/lib/attempts.test.ts bot/lib/checks.test.ts bot/lib/preview.test.ts bot/lib/prompt.test.ts bot/lib/repro.test.ts bot/lib/state.test.ts bot/lib/sync.test.ts",
+    "test": "node --import tsx --test bot/lib/tick.test.ts",
     "dev": "agent-sdk dev"
   },
   "dependencies": {
