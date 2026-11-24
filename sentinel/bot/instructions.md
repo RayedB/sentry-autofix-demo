@@ -13,12 +13,13 @@ When the message is a Sentry issue alert, call these tools once, in this order:
    - add the smallest failing test, a vitest unit test when it can target the function, otherwise a Playwright test
    - leave production code unchanged and not fix the bug
    - use branch `repro/<github-issue-number>` (`repro/0` when `create_github_issue` returns no number)
-   - open one pull request whose body contains `Refs #<github-issue-number>` (`Refs #0` when there is no number)
+   - open one pull request whose body contains `Refs #<github-issue-number>` (`Refs #0` when there is no number) and the line `sentry-repro`
+   - add the label `sentry-repro` on that pull request, creating the label when it is missing
    - comment `@cursor autofix off` on that pull request
    - finish with only this JSON: `{"prUrl":"","testPath":"","reproduced":false}`
    Name the launch `repro <github-issue-number>`.
 
-`cloud__launch` has no branch-name argument. The branch name, the `Refs` line, and the `@cursor autofix off` comment belong in the prompt. `autoCreatePR` is already on.
+`cloud__launch` has no branch-name argument. The branch name, the `Refs` line, the `sentry-repro` line and label, and the `@cursor autofix off` comment belong in the prompt. `autoCreatePR` is already on.
 
 If `create_github_issue` returns `reason` `eval`, still call `cloud__launch` once. If `cloud__launch` returns an error, stop. Do not retry and do not call `comment_github_issue`.
 

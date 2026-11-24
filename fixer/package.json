@@ -1,0 +1,22 @@
+{
+  "name": "fixer",
+  "private": true,
+  "type": "module",
+  "description": "GitHub agent that fixes a sentinel repro pull request, checks the Vercel preview, and squash-merges.",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --import tsx --test bot/lib/agent-id.test.ts bot/lib/attempts.test.ts bot/lib/checks.test.ts bot/lib/preview.test.ts bot/lib/prompt.test.ts bot/lib/repro.test.ts bot/lib/state.test.ts bot/lib/sync.test.ts",
+    "dev": "agent-sdk dev"
+  },
+  "dependencies": {
+    "@grok/agent-sdk": "0.7.2",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "typescript": "6.0.3"
+  }
+}
