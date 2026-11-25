@@ -17,6 +17,8 @@ const ZONES: Record<string, Zone> = {
   "949": { label: "North Bay", cents: 800 },
 };
 
+const STANDARD_ZONE: Zone = { label: "Standard", cents: 1200 };
+
 export type QuoteLine = {
   sku: Sku;
   name: string;
@@ -46,7 +48,8 @@ function deliveryFor(postalCode: string, subtotal: number): Zone {
     return { label: "Complimentary", cents: 0 };
   }
 
-  const zone = ZONES[postalCode.slice(0, 3)];
+  const prefix = postalCode.slice(0, 3);
+  const zone = Object.hasOwn(ZONES, prefix) ? ZONES[prefix] : STANDARD_ZONE;
   return { label: zone.label, cents: zone.cents };
 }
 
