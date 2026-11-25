@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import type { JsonValue } from "@grok/agent-sdk";
 import { getGitHubChannelOptions } from "@grok/agent-sdk/channels/github";
 import channel from "../channels/github.js";
+import { isStopped } from "./cloud-status.js";
 import { runKey, type FixRecord } from "./record.js";
 import { tick, type ComparedFile, type GitHub, type OpenPull } from "./tick.js";
 
@@ -414,5 +415,20 @@ describe("tick", () => {
   it("returns null from the comment hook", () => {
     const options = getGitHubChannelOptions(channel);
     assert.equal(options?.onComment?.({} as never, {} as never), null);
+  });
+});
+
+describe("isStopped", () => {
+  it("is true for finished, error, and expired", () => {
+    assert.equal(isStopped("finished"), true);
+    assert.equal(isStopped("error"), true);
+    assert.equal(isStopped("expired"), true);
+  });
+
+  it("is false for running, creating, unknown, and empty", () => {
+    assert.equal(isStopped("running"), false);
+    assert.equal(isStopped("creating"), false);
+    assert.equal(isStopped("unknown"), false);
+    assert.equal(isStopped(""), false);
   });
 });
