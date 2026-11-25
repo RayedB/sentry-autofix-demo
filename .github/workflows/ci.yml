@@ -36,3 +36,22 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - run: npm run build
       - run: npx playwright test
+
+  fixer:
+    name: fixer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: fixer/package-lock.json
+      - run: npm ci
+        working-directory: fixer
+      - run: npm test
+        working-directory: fixer
+      - run: npm run check
+        working-directory: fixer
+      - run: npx @grok/agent-sdk validate --dir .
+        working-directory: fixer
