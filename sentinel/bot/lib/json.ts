@@ -10,3 +10,8 @@ export function readString(record: Record<string, unknown>, key: string): string
   const trimmed = value.trim();
   return trimmed === "" ? null : trimmed;
 }
+
+export function readNumber(record: Record<string, unknown>, key: string): number | null {
+  const value = record[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}

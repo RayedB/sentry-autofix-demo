@@ -9,7 +9,7 @@ export default defineAgent({
     ],
   },
   hosting: {
-    egressDomains: ["us.sentry.io"],
+    egressDomains: ["us.sentry.io", "sentry-autofix-demo.vercel.app"],
     secretNames: ["SENTRY_CLIENT_SECRET", "SENTRY_API_TOKEN"],
   },
 });

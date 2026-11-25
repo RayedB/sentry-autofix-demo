@@ -2,12 +2,13 @@
   "name": "sentinel",
   "private": true,
   "type": "module",
-  "description": "Sentry issue-alert agent that files a GitHub repro issue and launches a failing-test cloud agent.",
+  "description": "Sentry issue-alert agent that files a GitHub repro issue, launches a failing-test cloud agent, and verifies the merged fix in production.",
   "engines": {
     "node": ">=22.13"
   },
   "scripts": {
     "check": "tsc --noEmit",
+    "test": "node --import tsx --test bot/lib/*.test.ts",
     "dev": "agent-sdk dev"
   },
   "dependencies": {

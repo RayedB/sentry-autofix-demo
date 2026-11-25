@@ -1,6 +1,7 @@
 import { defineTool } from "@grok/agent-sdk/tools";
 import * as z from "zod/v4";
 import { GITHUB_OWNER, GITHUB_REPO, isEvalSession } from "../lib/github.js";
+import { issueLinkJson, issueLinkKey, parseSentryIssueMemory, sentryIssueIdFromContinuation, sentryIssueKey } from "../lib/links.js";
 
 const inputSchema = z.object({
   title: z.string().min(1).describe("Sentry issue title"),
@@ -66,6 +67,18 @@ export default defineTool({
         "@cursor",
       ].join("\n"),
     });
+    const sentryIssueId = sentryIssueIdFromContinuation(ctx.session.continuationKey);
+    if (sentryIssueId !== null && data.number > 0) {
+      const memory = parseSentryIssueMemory(await ctx.host.kv.get(sentryIssueKey(sentryIssueId)));
+      await ctx.host.kv.put(
+        issueLinkKey(data.number),
+        issueLinkJson({
+          sentryIssueId,
+          githubIssueNumber: data.number,
+          replay: memory?.replay ?? null,
+        }),
+      );
+    }
     return {
       created: true,
       owner: GITHUB_OWNER,

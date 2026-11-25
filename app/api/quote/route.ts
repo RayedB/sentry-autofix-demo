@@ -1,4 +1,5 @@
 import { parseQuoteRequest, priceQuote } from "@/lib/pricing";
+import { recordReplayContext } from "@/lib/sentry-replay";
 
 export async function POST(request: Request) {
   let payload: unknown;
@@ -10,6 +11,8 @@ export async function POST(request: Request) {
       { status: 400 },
     );
   }
+
+  recordReplayContext(request, payload);
 
   const parsed = parseQuoteRequest(payload);
   if (!parsed.ok) {

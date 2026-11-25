@@ -1,10 +1,15 @@
 import { isRecord, readString } from "./json.js";
+import { extractReplaySpec, type ReplaySpec } from "./replay.js";
 
 export const SENTRY_API_ORIGIN = "https://us.sentry.io";
+export const SENTRY_ORG = "eurodelices";
 export const SENTRY_CLIENT_SECRET_NAME = "SENTRY_CLIENT_SECRET";
 export const SENTRY_API_TOKEN_NAME = "SENTRY_API_TOKEN";
 
 const ISSUE_ID = /^[0-9]{1,32}$/;
+const SKEW_MS = 5_000;
+
+type FetchImpl = typeof fetch;
 
 export type InAppFrame = {
   filename: string | null;
@@ -26,6 +31,20 @@ export type SentryIssueSnapshot = {
   exception: string | null;
   requestPath: string | null;
   inAppFrames: InAppFrame[];
+  request: JsonMap | null;
+  httpReplay: JsonMap | null;
+  replay: ReplaySpec | null;
+};
+
+/** JSON object safe to return from a tool. */
+export type JsonMap = { [key: string]: JsonLeaf };
+type JsonLeaf = string | number | boolean | null | JsonLeaf[] | JsonMap;
+
+export type ProductionEvent = {
+  id: string;
+  environment: string;
+  release: string | null;
+  dateCreated: string | null;
 };
 
 export function assertIssueId(issueId: string): string {
@@ -35,12 +54,17 @@ export function assertIssueId(issueId: string): string {
   return issueId;
 }
 
-export async function fetchSentryIssue(issueId: string, token: string): Promise<SentryIssueSnapshot> {
+export async function fetchSentryIssue(
+  issueId: string,
+  token: string,
+  fetchImpl: FetchImpl = fetch,
+): Promise<SentryIssueSnapshot> {
   const id = assertIssueId(issueId);
   const [issue, event] = await Promise.all([
-    sentryGet(`/issues/${id}/`, token),
-    sentryGet(`/issues/${id}/events/latest/`, token),
+    sentryObject(issuePath(id), token, fetchImpl),
+    sentryObject(`${issuePath(id)}events/latest/`, token, fetchImpl),
   ]);
+  const contexts = isRecord(event.contexts) ? event.contexts : null;
   return {
     id,
     title: readString(issue, "title"),
@@ -53,25 +77,151 @@ export async function fetchSentryIssue(issueId: string, token: string): Promise<
     exception: exceptionSummary(event),
     requestPath: requestPath(event),
     inAppFrames: inAppFrames(event),
+    request: jsonMap(event.request),
+    httpReplay: contexts !== null ? jsonMap(contexts.http_replay) : null,
+    replay: extractReplaySpec(event),
   };
 }
 
-async function sentryGet(path: string, token: string): Promise<Record<string, unknown>> {
-  const response = await fetch(`${SENTRY_API_ORIGIN}/api/0${path}`, {
-    headers: {
-      Accept: "application/json",
-      Authorization: `Bearer ${token}`,
-    },
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!response.ok) {
-    throw new Error(`Sentry API ${path} returned ${response.status}.`);
+export async function listProductionEvents(
+  issueId: string,
+  sinceIso: string,
+  prodSha: string,
+  token: string,
+  fetchImpl: FetchImpl = fetch,
+): Promise<ProductionEvent[]> {
+  const id = assertIssueId(issueId);
+  const path = `${issuePath(id)}events/?environment=production&statsPeriod=1h&per_page=25`;
+  const body = await sentryJson(path, token, fetchImpl);
+  if (!Array.isArray(body)) {
+    throw new Error(`Sentry API ${path} did not return a list.`);
   }
-  const body: unknown = await response.json();
+  const sinceMs = Date.parse(sinceIso);
+  const events: ProductionEvent[] = [];
+  for (const item of body) {
+    const event = productionEvent(item, sinceMs, prodSha);
+    if (event !== null) {
+      events.push(event);
+    }
+  }
+  return events;
+}
+
+export async function resolveSentryIssue(issueId: string, token: string, fetchImpl: FetchImpl = fetch): Promise<void> {
+  const id = assertIssueId(issueId);
+  await sentryJson(issuePath(id), token, fetchImpl, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status: "resolved" }),
+  });
+}
+
+function jsonMap(value: unknown): JsonMap | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const mapped: JsonMap = {};
+  for (const [key, child] of Object.entries(value)) {
+    const leaf = jsonLeaf(child);
+    if (leaf !== undefined) {
+      mapped[key] = leaf;
+    }
+  }
+  return mapped;
+}
+
+function jsonLeaf(value: unknown): JsonLeaf | undefined {
+  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => {
+      const leaf = jsonLeaf(item);
+      return leaf === undefined ? [] : [leaf];
+    });
+  }
+  if (isRecord(value)) {
+    return jsonMap(value) ?? undefined;
+  }
+  return undefined;
+}
+
+function issuePath(issueId: string): string {
+  return `/organizations/${SENTRY_ORG}/issues/${issueId}/`;
+}
+
+async function sentryObject(path: string, token: string, fetchImpl: FetchImpl): Promise<Record<string, unknown>> {
+  const body = await sentryJson(path, token, fetchImpl);
   if (!isRecord(body)) {
     throw new Error(`Sentry API ${path} did not return an object.`);
   }
   return body;
+}
+
+async function sentryJson(path: string, token: string, fetchImpl: FetchImpl, init: RequestInit = {}): Promise<unknown> {
+  const headers = new Headers(init.headers);
+  headers.set("Accept", "application/json");
+  headers.set("Authorization", `Bearer ${token}`);
+  const response = await fetchImpl(`${SENTRY_API_ORIGIN}/api/0${path}`, {
+    ...init,
+    headers,
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (response.status === 401 || response.status === 403) {
+    throw new Error(
+      `Sentry API ${path} returned ${response.status}. The token needs Issue & Event: Read & Write (event:write).`,
+    );
+  }
+  if (!response.ok) {
+    throw new Error(`Sentry API ${path} returned ${response.status}.`);
+  }
+  const text = await response.text();
+  if (text.trim() === "") {
+    return null;
+  }
+  return JSON.parse(text) as unknown;
+}
+
+function productionEvent(value: unknown, sinceMs: number, prodSha: string): ProductionEvent | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const environment = readString(value, "environment") ?? tagValue(value, "environment");
+  if (environment !== "production") {
+    return null;
+  }
+  const release = releaseOf(value) ?? tagValue(value, "release") ?? tagValue(value, "sentry:release");
+  const dateCreated = readString(value, "dateCreated") ?? readString(value, "date_created");
+  const createdMs = dateCreated === null ? Number.NaN : Date.parse(dateCreated);
+  const recent = Number.isFinite(createdMs) && Number.isFinite(sinceMs) && createdMs >= sinceMs - SKEW_MS;
+  const sameRelease = release !== null && release === prodSha;
+  if (!recent && !sameRelease) {
+    return null;
+  }
+  const id = readString(value, "eventID") ?? readString(value, "eventId") ?? readString(value, "id");
+  if (id === null) {
+    return null;
+  }
+  return { id, environment, release, dateCreated };
+}
+
+function tagValue(event: Record<string, unknown>, key: string): string | null {
+  const tags = event.tags;
+  if (Array.isArray(tags)) {
+    for (const tag of tags) {
+      if (Array.isArray(tag) && tag[0] === key && typeof tag[1] === "string") {
+        return tag[1];
+      }
+      if (isRecord(tag) && (tag.key === key || tag.name === key) && typeof tag.value === "string") {
+        return tag.value;
+      }
+    }
+    return null;
+  }
+  if (isRecord(tags) && typeof tags[key] === "string") {
+    return tags[key];
+  }
+  return null;
 }
 
 function projectSlug(issue: Record<string, unknown>): string | null {
