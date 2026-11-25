@@ -18,7 +18,7 @@ Connect GitHub for `RayedB/sentry-autofix-demo` in Cursor (Settings or https://c
 
 ## Set secrets
 
-Secret names are `SENTRY_CLIENT_SECRET` (Sentry internal integration client secret, HMAC key) and `SENTRY_API_TOKEN` (Sentry API bearer token for `https://us.sentry.io/api/0/`).
+Secret names are `SENTRY_CLIENT_SECRET` (Sentry internal integration client secret, HMAC key) and `SENTRY_API_TOKEN` (Sentry API bearer token for `https://us.sentry.io/api/0/`). The token needs **Issue & Event: Read & Write** (`event:write`). A read-only token can open the GitHub issue and cannot resolve the Sentry issue after production verification.
 
 Locally, export them in the shell that runs `dev`. Do not commit them.
 
@@ -112,11 +112,29 @@ EOF
 
 The fixture matches the Sentry issue-alert webhook shape: title `TypeError: Cannot read properties of undefined (reading 'label')`, culprit `POST /api/quote`, in-app frame `lib/pricing.ts:50`.
 
+## Phase 3: production verification
+
+After `fixer` squash-merges a repro pull request, the `verify` schedule (`*/2 * * * *`) checks production. It does not run inside a model turn.
+
+1. Read `https://sentry-autofix-demo.vercel.app/api/version` until that deploy is the merge commit, or a newer `main` commit that contains it. The wait is 30 minutes from `merged_at`.
+2. Replay the bug. An HTTP replay spec is sent to that origin with redirects disabled. A browser-only bug launches one read-only cloud agent (`launch_prod_verify`) that runs Playwright against production and does not edit, commit, push, or open a pull request.
+3. On the next tick, list Sentry events for the issue and keep only `environment=production` events for that production SHA, or events timestamped at the replay. Preview events grouped into the same issue are ignored.
+4. When that list is empty, resolve the Sentry issue, comment on the merged pull request and the GitHub issue, and close the GitHub issue with `state_reason: completed`.
+
+Resolving the issue requires the `event:write` permission above. A 401 or 403 from Sentry names that permission and leaves the GitHub issue open.
+
+Redeploy after this change. Pass `--cursor-events-repo` every time:
+
+```bash
+npx @grok/agent-sdk deploy --dir sentinel --cursor-events-repo RayedB/sentry-autofix-demo
+```
+
 ## Checks
 
 ```bash
 cd sentinel
 npm ci
+npm test
 npm run check
 npx @grok/agent-sdk validate --dir .
 npx @grok/agent-sdk info --dir . --json

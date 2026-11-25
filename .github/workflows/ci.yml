@@ -55,3 +55,22 @@ jobs:
         working-directory: fixer
       - run: npx @grok/agent-sdk validate --dir .
         working-directory: fixer
+
+  sentinel:
+    name: sentinel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sentinel/package-lock.json
+      - run: npm ci
+        working-directory: sentinel
+      - run: npm test
+        working-directory: sentinel
+      - run: npm run check
+        working-directory: sentinel
+      - run: npx @grok/agent-sdk validate --dir .
+        working-directory: sentinel

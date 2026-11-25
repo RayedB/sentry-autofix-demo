@@ -1,9 +1,10 @@
 import { defineChannel, hmacSignatureAuth, POST } from "@grok/agent-sdk/channels";
 import * as z from "zod/v4";
 import { readEventAlert } from "../lib/alert.js";
+import { isRecord } from "../lib/json.js";
+import { sentryIssueKey } from "../lib/links.js";
+import { extractReplaySpec, replayToJson } from "../lib/replay.js";
 import { SENTRY_CLIENT_SECRET_NAME } from "../lib/sentry.js";
-
-const DEDUPE_PREFIX = "sentry:issue:";
 
 export default defineChannel({
   auth: [
@@ -22,18 +23,20 @@ export default defineChannel({
           return new Response(null, { status: 200 });
         }
 
-        const key = `${DEDUPE_PREFIX}${decision.issueId}`;
+        const key = sentryIssueKey(decision.issueId);
         const seen = await host.kv.get(key);
         if (seen !== undefined) {
           return new Response(null, { status: 200 });
         }
+        const replay = extractReplaySpec(eventOf(body));
         await host.kv.put(key, {
           issueId: decision.issueId,
           acceptedAt: new Date().toISOString(),
+          ...(replay !== null ? { replay: replayToJson(replay) } : {}),
         });
 
         const turn = send(decision.message, {
-          continuationToken: `sentry-issue:${decision.issueId}`,
+          continuationToken: key,
           title: decision.title,
           workspaceFiles: {
             "sentry/event-alert.json": decision.snapshot,
@@ -51,3 +54,10 @@ export default defineChannel({
     }),
   ],
 });
+
+function eventOf(body: unknown): unknown {
+  if (!isRecord(body) || !isRecord(body.data)) {
+    return null;
+  }
+  return body.data.event;
+}

@@ -4,7 +4,7 @@ import { fetchSentryIssue, SENTRY_API_TOKEN_NAME } from "../lib/sentry.js";
 
 export default defineTool({
   description:
-    "Read one Sentry issue and its latest event from the US region: exception, in-app frames, release, and request path. Call this before opening a GitHub issue.",
+    "Read one Sentry issue and its latest event from the US region: exception, in-app frames, release, request, and replay spec. Call this before opening a GitHub issue.",
   effect: "read",
   inputSchema: z.object({
     issueId: z.string().describe("Sentry issue id from data.event.issue_id"),

@@ -7,7 +7,8 @@ export default cursorCloudAgents({
     autoCreatePR: true,
   },
   needsApproval: false,
-  channels: ["sentry"],
+  // "sentry" is the alert turn. "direct" is the verify schedule's callTool launch.
+  channels: ["sentry", "direct"],
   refuseSession: (session) =>
     session.purpose === "eval" ? "Eval sessions do not launch cloud agents." : undefined,
 });

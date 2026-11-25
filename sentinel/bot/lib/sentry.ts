@@ -1,10 +1,15 @@
-import { isRecord, readString } from "./json.js";
+import { isRecord, readString, tagValue } from "./json.js";
+import { extractReplaySpec, requestFromEvent, type ReplaySpec } from "./replay.js";
 
 export const SENTRY_API_ORIGIN = "https://us.sentry.io";
+export const SENTRY_ORG = "eurodelices";
 export const SENTRY_CLIENT_SECRET_NAME = "SENTRY_CLIENT_SECRET";
 export const SENTRY_API_TOKEN_NAME = "SENTRY_API_TOKEN";
 
 const ISSUE_ID = /^[0-9]{1,32}$/;
+const SKEW_MS = 5_000;
+
+type FetchImpl = typeof fetch;
 
 export type InAppFrame = {
   filename: string | null;
@@ -26,7 +31,27 @@ export type SentryIssueSnapshot = {
   exception: string | null;
   requestPath: string | null;
   inAppFrames: InAppFrame[];
+  replay: ReplaySpec | null;
 };
+
+export type ProductionEvent = {
+  id: string;
+  environment: string;
+  release: string | null;
+  dateCreated: string | null;
+};
+
+export class SentryNotFoundError extends Error {
+  readonly status = 404;
+  constructor(path: string) {
+    super(`Sentry API ${path} returned 404.`);
+    this.name = "SentryNotFoundError";
+  }
+}
+
+export function isSentryNotFound(error: unknown): boolean {
+  return error instanceof SentryNotFoundError;
+}
 
 export function assertIssueId(issueId: string): string {
   if (!ISSUE_ID.test(issueId)) {
@@ -35,11 +60,15 @@ export function assertIssueId(issueId: string): string {
   return issueId;
 }
 
-export async function fetchSentryIssue(issueId: string, token: string): Promise<SentryIssueSnapshot> {
+export async function fetchSentryIssue(
+  issueId: string,
+  token: string,
+  fetchImpl: FetchImpl = fetch,
+): Promise<SentryIssueSnapshot> {
   const id = assertIssueId(issueId);
   const [issue, event] = await Promise.all([
-    sentryGet(`/issues/${id}/`, token),
-    sentryGet(`/issues/${id}/events/latest/`, token),
+    sentryObject(issuePath(id), token, fetchImpl),
+    sentryObject(`${issuePath(id)}events/latest/`, token, fetchImpl),
   ]);
   return {
     id,
@@ -53,25 +82,103 @@ export async function fetchSentryIssue(issueId: string, token: string): Promise<
     exception: exceptionSummary(event),
     requestPath: requestPath(event),
     inAppFrames: inAppFrames(event),
+    replay: extractReplaySpec(event),
   };
 }
 
-async function sentryGet(path: string, token: string): Promise<Record<string, unknown>> {
-  const response = await fetch(`${SENTRY_API_ORIGIN}/api/0${path}`, {
-    headers: {
-      Accept: "application/json",
-      Authorization: `Bearer ${token}`,
-    },
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!response.ok) {
-    throw new Error(`Sentry API ${path} returned ${response.status}.`);
+export async function listProductionEvents(
+  issueId: string,
+  sinceIso: string,
+  prodSha: string,
+  token: string,
+  fetchImpl: FetchImpl = fetch,
+): Promise<ProductionEvent[]> {
+  const id = assertIssueId(issueId);
+  const path = `${issuePath(id)}events/?environment=production&statsPeriod=1h&per_page=25`;
+  const body = await sentryJson(path, token, fetchImpl);
+  if (!Array.isArray(body)) {
+    throw new Error(`Sentry API ${path} did not return a list.`);
   }
-  const body: unknown = await response.json();
+  const sinceMs = Date.parse(sinceIso);
+  const events: ProductionEvent[] = [];
+  for (const item of body) {
+    const event = productionEvent(item, sinceMs, prodSha);
+    if (event !== null) {
+      events.push(event);
+    }
+  }
+  return events;
+}
+
+export async function resolveSentryIssue(issueId: string, token: string, fetchImpl: FetchImpl = fetch): Promise<void> {
+  const id = assertIssueId(issueId);
+  await sentryJson(issuePath(id), token, fetchImpl, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status: "resolved" }),
+  });
+}
+
+function issuePath(issueId: string): string {
+  return `/organizations/${SENTRY_ORG}/issues/${issueId}/`;
+}
+
+async function sentryObject(path: string, token: string, fetchImpl: FetchImpl): Promise<Record<string, unknown>> {
+  const body = await sentryJson(path, token, fetchImpl);
   if (!isRecord(body)) {
     throw new Error(`Sentry API ${path} did not return an object.`);
   }
   return body;
+}
+
+async function sentryJson(path: string, token: string, fetchImpl: FetchImpl, init: RequestInit = {}): Promise<unknown> {
+  const headers = new Headers(init.headers);
+  headers.set("Accept", "application/json");
+  headers.set("Authorization", `Bearer ${token}`);
+  const response = await fetchImpl(`${SENTRY_API_ORIGIN}/api/0${path}`, {
+    ...init,
+    headers,
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (response.status === 404) {
+    throw new SentryNotFoundError(path);
+  }
+  if (response.status === 401 || response.status === 403) {
+    throw new Error(
+      `Sentry API ${path} returned ${response.status}. The token needs Issue & Event: Read & Write (event:write).`,
+    );
+  }
+  if (!response.ok) {
+    throw new Error(`Sentry API ${path} returned ${response.status}.`);
+  }
+  const text = await response.text();
+  if (text.trim() === "") {
+    return null;
+  }
+  return JSON.parse(text) as unknown;
+}
+
+function productionEvent(value: unknown, sinceMs: number, prodSha: string): ProductionEvent | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const environment = readString(value, "environment") ?? tagValue(value, "environment");
+  if (environment !== "production") {
+    return null;
+  }
+  const release = releaseOf(value) ?? tagValue(value, "release") ?? tagValue(value, "sentry:release");
+  const dateCreated = readString(value, "dateCreated") ?? readString(value, "date_created");
+  const createdMs = dateCreated === null ? Number.NaN : Date.parse(dateCreated);
+  const recent = Number.isFinite(createdMs) && Number.isFinite(sinceMs) && createdMs >= sinceMs - SKEW_MS;
+  const sameRelease = release !== null && release === prodSha;
+  if (!recent && !sameRelease) {
+    return null;
+  }
+  const id = readString(value, "eventID") ?? readString(value, "eventId") ?? readString(value, "id");
+  if (id === null) {
+    return null;
+  }
+  return { id, environment, release, dateCreated };
 }
 
 function projectSlug(issue: Record<string, unknown>): string | null {
@@ -107,27 +214,9 @@ function exceptionSummary(event: Record<string, unknown>): string | null {
 }
 
 function requestPath(event: Record<string, unknown>): string | null {
-  const direct = requestUrl(event.request);
-  if (direct !== null) {
-    return pathOf(direct);
-  }
-  for (const entry of entries(event)) {
-    if (readString(entry, "type") !== "request") {
-      continue;
-    }
-    const url = requestUrl(entry.data);
-    if (url !== null) {
-      return pathOf(url);
-    }
-  }
-  return null;
-}
-
-function requestUrl(value: unknown): string | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-  return readString(value, "url");
+  const url = requestFromEvent(event);
+  const direct = url === null ? null : readString(url, "url");
+  return direct === null ? null : pathOf(direct);
 }
 
 function pathOf(url: string): string {
