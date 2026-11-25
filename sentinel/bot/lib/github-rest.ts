@@ -79,6 +79,7 @@ function closedPullFrom(value: unknown): ClosedPull | null {
   }
   const head = isRecord(value.head) ? value.head : null;
   const repo = head !== null && isRecord(head.repo) ? readString(head.repo, "full_name") : null;
+  const headRef = head === null ? null : readString(head, "ref");
   const mergedAt = readString(value, "merged_at");
   const labels = Array.isArray(value.labels)
     ? value.labels.flatMap((label) => {
@@ -100,6 +101,7 @@ function closedPullFrom(value: unknown): ClosedPull | null {
     body: typeof value.body === "string" ? value.body : null,
     title: readString(value, "title") ?? "",
     htmlUrl: url,
+    headRef,
   };
 }
 

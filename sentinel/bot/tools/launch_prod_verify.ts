@@ -28,6 +28,9 @@ export default defineTool({
   inputSchema,
   dryRunResult: (): LaunchProdVerifyResult => ({ agentId: "", url: "" }),
   async execute(input, ctx): Promise<LaunchProdVerifyResult> {
+    if (ctx.session.channelId !== "direct") {
+      throw new Error("launch_prod_verify can only run from the verify schedule.");
+    }
     if (!isSafeProdPath(input.path)) {
       throw new Error("path must be a relative path on the production origin.");
     }

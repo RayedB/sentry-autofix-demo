@@ -129,6 +129,52 @@ describe("extractReplaySpec", () => {
       }),
       null,
     );
+
+    const nested = { items: [{ sku: "croissant", quantity: 2 }], promoCode: "VIP10" };
+    const fromString = extractReplaySpec({
+      contexts: {
+        http_replay: {
+          method: "POST",
+          path: "/api/quote",
+          contentType: "application/json",
+          body: JSON.stringify(nested),
+        },
+      },
+    });
+    assert.equal(fromString?.kind, "http");
+    if (fromString?.kind === "http") {
+      assert.equal(fromString.body, JSON.stringify(nested));
+      assert.equal(fromString.path, "/api/quote");
+    }
+  });
+
+  it("reads a Sentry REST request entry when event.request is absent", () => {
+    const nested = { items: [{ sku: "croissant", quantity: 2 }], promoCode: "VIP10" };
+    const spec = extractReplaySpec({
+      platform: "node",
+      entries: [
+        { type: "exception", data: { values: [{ type: "Error", value: "nope" }] } },
+        {
+          type: "request",
+          data: {
+            method: "POST",
+            url: `${PROD_ORIGIN}/api/quote`,
+            data: nested,
+            headers: [
+              ["Content-Type", "application/json"],
+              ["Cookie", "session"],
+            ],
+          },
+        },
+      ],
+    });
+    assert.equal(spec?.kind, "http");
+    if (spec?.kind === "http") {
+      assert.equal(spec.method, "POST");
+      assert.equal(spec.path, "/api/quote");
+      assert.equal(spec.contentType, "application/json");
+      assert.equal(spec.body, JSON.stringify(nested));
+    }
   });
 
   it("falls through a truncated context and accepts an agent spec", () => {

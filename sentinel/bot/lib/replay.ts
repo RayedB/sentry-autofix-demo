@@ -1,5 +1,6 @@
 import type { JsonObject } from "@grok/agent-sdk";
-import { isRecord, readString } from "./json.js";
+import * as z from "zod/v4";
+import { isRecord, readString, tagValue } from "./json.js";
 
 export const PROD_ORIGIN = "https://sentry-autofix-demo.vercel.app";
 
@@ -75,42 +76,51 @@ export function isSafeTestPath(path: string): boolean {
   return /^[A-Za-z0-9_./-]+$/.test(path);
 }
 
+const httpReplayInput = z.object({
+  kind: z.string().optional(),
+  method: z.string().min(1),
+  path: z.string().min(1),
+  contentType: z.string().optional(),
+  "content-type": z.string().optional(),
+  body: z.unknown().optional(),
+  headers: z.unknown().optional(),
+  expectStatusMin: z.number().optional(),
+  expectStatusMax: z.number().optional(),
+});
+
+const browserReplayInput = z.object({
+  kind: z.literal("browser"),
+  path: z.string().min(1),
+  description: z.string().min(1).max(2_000),
+  testPath: z.string().nullable().optional(),
+});
+
 /** Accept only a relative same-origin request. Absolute URLs and extra headers are rejected. */
 export function validateHttpReplay(raw: unknown): HttpReplaySpec | null {
-  if (!isRecord(raw)) {
+  const parsed = httpReplayInput.safeParse(raw);
+  if (!parsed.success || (parsed.data.kind !== undefined && parsed.data.kind !== "http")) {
     return null;
   }
-  if (raw.kind !== undefined && raw.kind !== "http") {
+  const data = parsed.data;
+  if (!METHOD_SET.has(data.method.toUpperCase()) || !isSafeProdPath(data.path) || !headersAllowed(data.headers)) {
     return null;
   }
-  const methodRaw = plainString(raw.method);
-  if (methodRaw === null || !METHOD_SET.has(methodRaw.toUpperCase())) {
-    return null;
-  }
-  const method = methodRaw.toUpperCase() as HttpMethod;
-  const path = plainString(raw.path);
-  if (path === null || !isSafeProdPath(path)) {
-    return null;
-  }
-  if (!headersAllowed(raw.headers)) {
-    return null;
-  }
-  const contentType = contentTypeOf(raw);
+  const contentType = contentTypeOf(data);
   if (contentType === undefined) {
     return null;
   }
-  const body = bodyOf(raw.body);
+  const body = bodyOf(data.body);
   if (body === undefined) {
     return null;
   }
-  const range = statusRange(raw);
+  const range = statusRange(data.expectStatusMin, data.expectStatusMax);
   if (range === null) {
     return null;
   }
   const spec: HttpReplaySpec = {
     kind: "http",
-    method,
-    path,
+    method: data.method.toUpperCase() as HttpMethod,
+    path: data.path,
     expectStatusMin: range.min,
     expectStatusMax: range.max,
   };
@@ -124,23 +134,22 @@ export function validateHttpReplay(raw: unknown): HttpReplaySpec | null {
 }
 
 export function validateBrowserReplay(raw: unknown): BrowserReplaySpec | null {
-  if (!isRecord(raw) || raw.kind !== "browser") {
+  const parsed = browserReplayInput.safeParse(raw);
+  if (!parsed.success || !isSafeProdPath(parsed.data.path)) {
     return null;
   }
-  const path = plainString(raw.path);
-  const description = readString(raw, "description");
-  if (path === null || !isSafeProdPath(path) || description === null || description.length > 2_000) {
+  const description = parsed.data.description.trim();
+  if (description.length === 0) {
     return null;
   }
-  const spec: BrowserReplaySpec = { kind: "browser", path, description };
-  if (raw.testPath === undefined || raw.testPath === null) {
+  const spec: BrowserReplaySpec = { kind: "browser", path: parsed.data.path, description };
+  if (parsed.data.testPath === undefined || parsed.data.testPath === null) {
     return spec;
   }
-  const testPath = plainString(raw.testPath);
-  if (testPath === null || !isSafeTestPath(testPath)) {
+  if (!isSafeTestPath(parsed.data.testPath)) {
     return null;
   }
-  spec.testPath = testPath;
+  spec.testPath = parsed.data.testPath;
   return spec;
 }
 
@@ -157,6 +166,25 @@ export function parseAgentReplay(raw: unknown): ReplaySpec | null {
   return null;
 }
 
+/** Top-level `request`, or the REST shape `entries[type=request].data`. */
+export function requestFromEvent(event: unknown): Record<string, unknown> | null {
+  if (!isRecord(event)) {
+    return null;
+  }
+  if (isRecord(event.request)) {
+    return event.request;
+  }
+  if (!Array.isArray(event.entries)) {
+    return null;
+  }
+  for (const entry of event.entries) {
+    if (isRecord(entry) && entry.type === "request" && isRecord(entry.data)) {
+      return entry.data;
+    }
+  }
+  return null;
+}
+
 /**
  * Prefer the redacted `http_replay` context, then a same-origin API request,
  * then a Phase 1 agent spec, then a browser page. Never invents a path.
@@ -167,7 +195,7 @@ export function extractReplaySpec(event: unknown, agentReplay?: unknown): Replay
   if (fromContext !== null) {
     return fromContext;
   }
-  const fromRequest = httpFromRequest(record.request);
+  const fromRequest = httpFromRequest(requestFromEvent(record));
   if (fromRequest !== null) {
     return fromRequest;
   }
@@ -299,11 +327,12 @@ function browserFromEvent(event: Record<string, unknown>): BrowserReplaySpec | n
 }
 
 function hasApiPost(event: Record<string, unknown>): boolean {
-  return httpFromRequest(event.request)?.kind === "http";
+  return httpFromRequest(requestFromEvent(event))?.kind === "http";
 }
 
 function pagePath(event: Record<string, unknown>): string | null {
-  const requestUrl = isRecord(event.request) ? plainString(event.request.url) : null;
+  const request = requestFromEvent(event);
+  const requestUrl = request === null ? null : plainString(request.url);
   const tagged = tagValue(event, "url");
   const candidates = [
     requestUrl === null ? null : relativeProdPath(requestUrl),
@@ -417,7 +446,7 @@ function headerValue(headers: unknown, name: string): string | null {
   return null;
 }
 
-function contentTypeOf(raw: Record<string, unknown>): string | null | undefined {
+function contentTypeOf(raw: { contentType?: string; "content-type"?: string; headers?: unknown }): string | null | undefined {
   const direct = plainString(raw.contentType) ?? plainString(raw["content-type"]);
   const fromHeaders = headerValue(raw.headers, "content-type");
   const value = direct ?? fromHeaders;
@@ -465,9 +494,9 @@ function dataToBody(data: unknown): string | null {
   return body;
 }
 
-function statusRange(raw: Record<string, unknown>): { min: number; max: number } | null {
-  const min = raw.expectStatusMin === undefined ? DEFAULT_MIN : raw.expectStatusMin;
-  const max = raw.expectStatusMax === undefined ? DEFAULT_MAX : raw.expectStatusMax;
+function statusRange(minValue: number | undefined, maxValue: number | undefined): { min: number; max: number } | null {
+  const min = minValue === undefined ? DEFAULT_MIN : minValue;
+  const max = maxValue === undefined ? DEFAULT_MAX : maxValue;
   if (typeof min !== "number" || typeof max !== "number" || !Number.isInteger(min) || !Number.isInteger(max)) {
     return null;
   }
@@ -490,22 +519,4 @@ function plainString(value: unknown): string | null {
 
 function byteLength(value: string): number {
   return new TextEncoder().encode(value).length;
-}
-
-function tagValue(event: Record<string, unknown>, key: string): string | null {
-  const tags = event.tags;
-  if (Array.isArray(tags)) {
-    for (const tag of tags) {
-      if (Array.isArray(tag) && tag[0] === key && typeof tag[1] === "string") {
-        return tag[1];
-      }
-      if (isRecord(tag) && (tag.key === key || tag.name === key) && typeof tag.value === "string") {
-        return tag.value;
-      }
-    }
-  }
-  if (isRecord(tags) && typeof tags[key] === "string") {
-    return tags[key];
-  }
-  return null;
 }

@@ -4,8 +4,9 @@ import type { JsonValue } from "@grok/agent-sdk";
 import { githubFromOctokit } from "./github-rest.js";
 import { prLinkKey } from "./links.js";
 import { PROD_ORIGIN, type ReplaySpec } from "./replay.js";
-import { fetchSentryIssue, listProductionEvents, resolveSentryIssue, SENTRY_ORG } from "./sentry.js";
+import { fetchSentryIssue, listProductionEvents, resolveSentryIssue, SentryNotFoundError, SENTRY_ORG } from "./sentry.js";
 import {
+  parseBrowserResult,
   parseVerifyRecord,
   verifyKey,
   verifyTick,
@@ -53,6 +54,7 @@ function pull(overrides: Partial<ClosedPull> = {}): ClosedPull {
     body: "Refs #12\n",
     title: "Fix quote",
     htmlUrl: "https://github.com/RayedB/sentry-autofix-demo/pull/7",
+    headRef: "repro/12",
     ...overrides,
   };
 }
@@ -83,6 +85,8 @@ function stored(overrides: Partial<VerifyRecord> = {}): VerifyRecord {
     agentUrl: null,
     startedAt: null,
     failure: null,
+    testPath: null,
+    replay: null,
     ...overrides,
   };
 }
@@ -221,7 +225,6 @@ describe("verifyTick", () => {
       pull({ headRepoFullName: null }),
       pull({ baseRef: "develop" }),
       pull({ merged: false, mergedAt: null, mergeCommitSha: null }),
-      pull({ labels: [], body: "no link here", title: "chore" }),
     ];
     for (const variant of variants) {
       const run = harness({ pull: variant, link: link() });
@@ -233,6 +236,17 @@ describe("verifyTick", () => {
       assert.deepEqual(run.sentryCalls, []);
       assert.equal(run.launches.length, 0);
     }
+
+    const human = harness({
+      pull: pull({ labels: [], headRef: "feature/quote", body: "Refs #12\n", title: "Ship the homepage" }),
+      link: null,
+    });
+    await human.run();
+    assert.equal(human.record(), null);
+    assert.deepEqual(human.githubCalls, []);
+    assert.deepEqual(human.fetches, []);
+    assert.deepEqual(human.sentryCalls, []);
+    assert.equal(human.comments.length, 0);
   });
 
   it("short-circuits terminal records with zero API calls", async () => {
@@ -405,23 +419,28 @@ describe("verifyTick", () => {
     const run = harness({ pull: pull({ body: "fixed the bug", title: "Fix quote" }) });
     await run.run();
     assert.equal(run.record()?.phase, "failed");
-    assert.match(run.record()?.failure ?? "", /No safe production replay descriptor/);
+    assert.match(run.record()?.failure ?? "", /No Sentry issue id was linked/);
     assert.equal(run.fetches.length, 0);
     assert.deepEqual(run.sentryCalls, []);
     assert.equal(run.githubCalls.includes("getIssue:12"), false);
     assert.ok(run.comments.some((comment) => comment.number === 7 && comment.body.includes("was not resolved")));
   });
 
-  it("fails a deploy wait that exceeds 30 minutes", async () => {
+  it("fails a deploy wait that exceeds 30 minutes only when production is still behind", async () => {
     const mergedAt = new Date(NOW - 31 * 60 * 1000).toISOString();
-    const run = harness({ link: link(), pull: pull({ mergedAt }) });
-    await run.run();
-    assert.equal(run.record()?.phase, "failed");
-    assert.match(run.record()?.failure ?? "", /30 minutes/);
-    assert.equal(run.fetches.length, 0);
-    assert.deepEqual(run.sentryCalls, []);
-    assert.ok(run.comments.some((comment) => comment.number === 7));
-    assert.ok(run.comments.some((comment) => comment.number === 12));
+    const behind = harness({ link: link(), pull: pull({ mergedAt }), prodSha: PROD, compare: "behind" });
+    await behind.run();
+    assert.equal(behind.record()?.phase, "failed");
+    assert.match(behind.record()?.failure ?? "", /30 minutes/);
+    assert.ok(behind.fetches.some((call) => call.url.endsWith("/api/version")));
+    assert.deepEqual(behind.sentryCalls, []);
+    assert.ok(behind.comments.some((comment) => comment.number === 7));
+    assert.ok(behind.comments.some((comment) => comment.number === 12));
+
+    const live = harness({ link: link(), pull: pull({ mergedAt }), prodSha: MERGE });
+    await live.run();
+    assert.equal(live.record()?.phase, "replayed");
+    assert.equal(live.comments.length, 0);
   });
 
   it("drops a merged pull older than 24 hours unless verification is already in progress", async () => {
@@ -438,13 +457,12 @@ describe("verifyTick", () => {
       record: stored({ phase: "waiting_deploy", mergedAt, prodSha: null, replaySummary: null, replayedAt: null }),
     });
     await tracked.run();
-    assert.equal(tracked.record()?.phase, "failed");
-    assert.match(tracked.record()?.failure ?? "", /30 minutes/);
+    assert.equal(tracked.record()?.phase, "replayed");
   });
 
   it("recovers a missing pull link from Refs and the GitHub issue body", async () => {
     const run = harness({
-      pull: pull({ labels: [], body: "Refs #12\n", title: "repro" }),
+      pull: pull({ labels: [], headRef: "repro/12", body: "Refs #12\n", title: "repro" }),
       prodSha: MERGE,
       fetchedReplay: httpReplay,
     });
@@ -549,9 +567,15 @@ describe("sentry production events", () => {
     if (snap.replay?.kind === "http") {
       assert.equal(snap.replay.path, "/api/from-context");
     }
-    assert.equal(snap.request?.url, `${PROD_ORIGIN}/api/from-request`);
-    assert.equal(snap.httpReplay?.path, "/api/from-context");
+    assert.equal(snap.requestPath, "/api/from-request");
     assert.ok(urls.every((url) => url.includes(`/api/0/organizations/${SENTRY_ORG}/issues/42/`)));
+  });
+
+  it("throws a not-found error when the issue is gone", async () => {
+    await assert.rejects(
+      () => fetchSentryIssue("42", "token", async () => new Response("missing", { status: 404 })),
+      SentryNotFoundError,
+    );
   });
 
   it("names the event:write permission when resolve is forbidden", async () => {
@@ -559,6 +583,69 @@ describe("sentry production events", () => {
     await assert.rejects(() => resolveSentryIssue("42", "token", denied), /Issue & Event: Read & Write \(event:write\)/);
     const unauthorized: typeof fetch = async () => new Response("no", { status: 401 });
     await assert.rejects(() => resolveSentryIssue("42", "token", unauthorized), /event:write/);
+  });
+});
+
+describe("verify edges", () => {
+  it("parses a trailing JSON verdict when the prose contains braces", () => {
+    assert.deepEqual(
+      parseBrowserResult('The form {quote} failed before\n{"passed":false,"summary":"pageerror: boom"}'),
+      { passed: false, summary: "pageerror: boom" },
+    );
+    assert.deepEqual(parseBrowserResult('noise {not json}\n{"passed":true,"summary":"use {a}"}'), {
+      passed: true,
+      summary: "use {a}",
+    });
+  });
+
+  it("skips a repro whose GitHub issue has no Sentry URL", async () => {
+    const run = harness({
+      pull: pull({ labels: ["sentry-repro"], headRef: "repro/12", body: "Refs #12\n" }),
+      link: null,
+      issue: { body: "A normal bug with no Sentry link.", state: "open" },
+    });
+    await run.run();
+    assert.equal(run.record(), null);
+    assert.equal(run.comments.length, 0);
+    assert.equal(run.fetches.length, 0);
+    assert.deepEqual(run.sentryCalls, []);
+    assert.ok(run.githubCalls.includes("getIssue:12"));
+  });
+
+  it("records a deleted Sentry issue once and does not comment", async () => {
+    const run = harness({
+      pull: pull({ labels: [], headRef: "repro/6", body: "Refs #6\n" }),
+      link: null,
+      issue: { body: "Sentry: https://eurodelices.sentry.io/issues/7863552643/", state: "open" },
+      sentry: {
+        async fetchIssue() {
+          throw new SentryNotFoundError("/organizations/eurodelices/issues/7863552643/");
+        },
+        async listProductionEvents() {
+          return [];
+        },
+        async resolveIssue() {
+          throw new Error("resolve");
+        },
+      },
+    });
+    await run.run();
+    assert.equal(run.record()?.phase, "failed");
+    assert.match(run.record()?.failure ?? "", /not found/);
+    assert.equal(run.comments.length, 0);
+    await run.run();
+    assert.equal(run.comments.length, 0);
+    assert.equal(run.githubCalls.filter((call) => call.startsWith("getIssue")).length, 1);
+  });
+
+  it("does not read the pull link again while production is still behind", async () => {
+    const run = harness({ link: link(), prodSha: PROD, compare: "behind" });
+    await run.run();
+    await run.run();
+    assert.equal(run.record()?.phase, "waiting_deploy");
+    assert.equal(run.kvGets.filter((key) => key === prLinkKey(7)).length, 1);
+    assert.deepEqual(run.sentryCalls, []);
+    assert.equal(run.githubCalls.filter((call) => call.startsWith("getIssue")).length, 0);
   });
 });
 

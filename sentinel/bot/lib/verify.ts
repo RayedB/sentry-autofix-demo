@@ -1,9 +1,11 @@
 import type { JsonObject, JsonValue } from "@grok/agent-sdk";
+import * as z from "zod/v4";
 import { isStopped } from "./cloud-status.js";
 import { GITHUB_FULL_NAME } from "./github.js";
-import { isRecord, readNumber, readString } from "./json.js";
-import { parsePrLink, prLinkKey, refsIssueNumber, sentryIssueIdFromText } from "./links.js";
-import { PROD_ORIGIN, runHttpReplay, type ReplaySpec } from "./replay.js";
+import { isRecord, readString } from "./json.js";
+import { parsePrLink, prLinkKey, refsIssueNumber, sentryIssueIdFromText, type PrLink } from "./links.js";
+import { parseAgentReplay, PROD_ORIGIN, replayToJson, runHttpReplay, type ReplaySpec } from "./replay.js";
+import { isSentryNotFound } from "./sentry.js";
 
 const REPRO_LABEL = "sentry-repro";
 const SHA = /^[0-9a-f]{7,64}$/i;
@@ -28,6 +30,8 @@ export type VerifyRecord = {
   agentUrl: string | null;
   startedAt: string | null;
   failure: string | null;
+  testPath: string | null;
+  replay: ReplaySpec | null;
 };
 
 export type ClosedPull = {
@@ -41,6 +45,7 @@ export type ClosedPull = {
   body: string | null;
   title: string;
   htmlUrl: string;
+  headRef: string | null;
 };
 
 export type VerifyGitHub = {
@@ -86,16 +91,42 @@ export type VerifyDeps = {
 
 type TrackedPull = ClosedPull & { mergedAt: string; mergeCommitSha: string };
 
-type Linked = {
-  sentryIssueId: string | null;
+type ReadyLink = {
+  kind: "ready";
+  sentryIssueId: string;
   githubIssueNumber: number | null;
   testPath: string | null;
-  replay: ReplaySpec | null;
+  replay: ReplaySpec;
 };
+
+type LinkOutcome =
+  | ReadyLink
+  | { kind: "not-sentry" }
+  | { kind: "missing"; sentryIssueId: string; githubIssueNumber: number | null }
+  | { kind: "none"; sentryIssueId: string | null; githubIssueNumber: number | null };
+
+const verifyRecordSchema = z.object({
+  prNumber: z.number().int().positive(),
+  phase: z.enum(["waiting_deploy", "verifying_browser", "replayed", "resolved", "failed"]),
+  sentryIssueId: z.string().nullable().optional(),
+  githubIssueNumber: z.number().int().positive().nullable().optional(),
+  mergeCommitSha: z.string().min(1),
+  mergedAt: z.string().min(1),
+  prodSha: z.string().nullable().optional(),
+  replayMode: z.enum(["http", "browser"]).nullable().optional(),
+  replaySummary: z.string().nullable().optional(),
+  replayedAt: z.string().nullable().optional(),
+  agentId: z.string().nullable().optional(),
+  agentUrl: z.string().nullable().optional(),
+  startedAt: z.string().nullable().optional(),
+  failure: z.string().nullable().optional(),
+  testPath: z.string().nullable().optional(),
+  replay: z.unknown().optional().nullable(),
+});
 
 /** One pass over one closed pull request. At most one phase change. No sleep. */
 export async function verifyTick(deps: VerifyDeps, pull: ClosedPull): Promise<void> {
-  if (!isTrackedPull(pull)) {
+  if (!isCandidate(pull)) {
     return;
   }
   const existing = parseVerifyRecord(await deps.kv.get(verifyKey(pull.number)));
@@ -104,6 +135,11 @@ export async function verifyTick(deps: VerifyDeps, pull: ClosedPull): Promise<vo
     return;
   }
   if (isStale(pull, existing, now)) {
+    return;
+  }
+  const cached = existing?.replay != null && existing.sentryIssueId != null;
+  const prLink = cached ? null : parsePrLink(await deps.kv.get(prLinkKey(pull.number)));
+  if (!isReproPull(pull, cached || prLink !== null)) {
     return;
   }
 
@@ -122,7 +158,7 @@ export async function verifyTick(deps: VerifyDeps, pull: ClosedPull): Promise<vo
       await stepReplayed(deps, existing, pull);
       return;
     case "waiting_deploy":
-      await stepWaiting(deps, existing, pull, now);
+      await stepWaiting(deps, existing, pull, now, prLink);
       return;
     default: {
       const unknown: never = phase;
@@ -136,71 +172,77 @@ export function verifyKey(prNumber: number): string {
 }
 
 export function parseVerifyRecord(value: unknown): VerifyRecord | null {
-  if (!isRecord(value)) {
+  const parsed = verifyRecordSchema.safeParse(value);
+  if (!parsed.success) {
     return null;
   }
-  const prNumber = readNumber(value, "prNumber");
-  const phase = readString(value, "phase");
-  const mergeCommitSha = readString(value, "mergeCommitSha");
-  const mergedAt = readString(value, "mergedAt");
-  if (
-    prNumber === null ||
-    !Number.isInteger(prNumber) ||
-    mergeCommitSha === null ||
-    mergedAt === null ||
-    !isPhase(phase)
-  ) {
-    return null;
-  }
-  const issueNumber = readNumber(value, "githubIssueNumber");
+  const data = parsed.data;
   return {
-    prNumber,
-    phase,
-    sentryIssueId: readString(value, "sentryIssueId"),
-    githubIssueNumber: issueNumber !== null && Number.isInteger(issueNumber) && issueNumber > 0 ? issueNumber : null,
-    mergeCommitSha,
-    mergedAt,
-    prodSha: readString(value, "prodSha"),
-    replayMode: value.replayMode === "http" || value.replayMode === "browser" ? value.replayMode : null,
-    replaySummary: typeof value.replaySummary === "string" ? value.replaySummary : null,
-    replayedAt: readString(value, "replayedAt"),
-    agentId: readString(value, "agentId"),
-    agentUrl: typeof value.agentUrl === "string" ? value.agentUrl : null,
-    startedAt: readString(value, "startedAt"),
-    failure: typeof value.failure === "string" ? value.failure : null,
+    prNumber: data.prNumber,
+    phase: data.phase,
+    sentryIssueId: data.sentryIssueId ?? null,
+    githubIssueNumber: data.githubIssueNumber ?? null,
+    mergeCommitSha: data.mergeCommitSha,
+    mergedAt: data.mergedAt,
+    prodSha: data.prodSha ?? null,
+    replayMode: data.replayMode ?? null,
+    replaySummary: data.replaySummary ?? null,
+    replayedAt: data.replayedAt ?? null,
+    agentId: data.agentId ?? null,
+    agentUrl: data.agentUrl ?? null,
+    startedAt: data.startedAt ?? null,
+    failure: data.failure ?? null,
+    testPath: data.testPath ?? null,
+    replay: data.replay == null ? null : parseAgentReplay(data.replay),
   };
 }
 
-async function stepWaiting(deps: VerifyDeps, existing: VerifyRecord | null, pull: TrackedPull, now: number): Promise<void> {
-  const linked = await resolveLink(deps, pull);
-  const record = withLink(existing, pull, linked);
-  if (linked.replay === null || linked.sentryIssueId === null) {
+async function stepWaiting(
+  deps: VerifyDeps,
+  existing: VerifyRecord | null,
+  pull: TrackedPull,
+  now: number,
+  prefetched: PrLink | null,
+): Promise<void> {
+  const linked = await linkFor(deps, existing, pull, prefetched);
+  if (linked.kind === "not-sentry") {
+    return;
+  }
+  if (linked.kind === "missing") {
+    await save(deps, {
+      ...withIds(existing, pull, linked.sentryIssueId, linked.githubIssueNumber),
+      phase: "failed",
+      failure: `Sentry issue ${linked.sentryIssueId} was not found.`,
+    });
+    return;
+  }
+  if (linked.kind === "none") {
     const reason =
-      linked.replay === null
-        ? "No safe production replay descriptor was found for this merge."
-        : "No Sentry issue id was linked to this pull request.";
-    await fail(deps, pull, record, reason);
+      linked.sentryIssueId === null
+        ? "No Sentry issue id was linked to this pull request."
+        : "No safe production replay descriptor was found for this merge.";
+    await fail(deps, pull, withIds(existing, pull, linked.sentryIssueId, linked.githubIssueNumber), reason);
     return;
   }
-  if (now - Date.parse(pull.mergedAt) > DEPLOY_MS) {
-    await fail(deps, pull, record, `Production did not serve merge ${pull.mergeCommitSha} within 30 minutes.`);
-    return;
-  }
+  const record = withLink(existing, pull, linked);
   const prodSha = await readProdSha(deps.fetchImpl ?? fetch);
   if (prodSha === null || !(await deployReady(deps, pull.mergeCommitSha, prodSha))) {
+    if (now - Date.parse(pull.mergedAt) > DEPLOY_MS) {
+      await fail(deps, pull, { ...record, prodSha }, `Production did not serve merge ${pull.mergeCommitSha} within 30 minutes.`);
+      return;
+    }
     await save(deps, { ...record, phase: "waiting_deploy", prodSha, failure: null });
     return;
   }
-  const replay = linked.replay;
-  switch (replay.kind) {
+  switch (linked.replay.kind) {
     case "http":
-      await replayHttp(deps, pull, record, replay, prodSha, now);
+      await replayHttp(deps, pull, record, linked.replay, prodSha, now);
       return;
     case "browser":
-      await launchBrowser(deps, pull, record, replay, linked.testPath, prodSha, now);
+      await launchBrowser(deps, pull, record, linked.replay, linked.testPath, prodSha, now);
       return;
     default: {
-      const unknown: never = replay;
+      const unknown: never = linked.replay;
       return unknown;
     }
   }
@@ -254,6 +296,7 @@ async function stepReplayed(deps: VerifyDeps, record: VerifyRecord, pull: Tracke
   }
   await deps.sentry.resolveIssue(record.sentryIssueId);
   const resolved = { ...record, phase: "resolved" as const, failure: null };
+  await save(deps, resolved);
   await commentBoth(deps, pull.number, record.githubIssueNumber, successComment(resolved));
   if (record.githubIssueNumber !== null) {
     const issue = await deps.github.getIssue(record.githubIssueNumber);
@@ -261,7 +304,6 @@ async function stepReplayed(deps: VerifyDeps, record: VerifyRecord, pull: Tracke
       await deps.github.closeIssue(record.githubIssueNumber);
     }
   }
-  await save(deps, resolved);
 }
 
 async function replayHttp(
@@ -321,28 +363,61 @@ async function launchBrowser(
   });
 }
 
-async function resolveLink(deps: VerifyDeps, pull: TrackedPull): Promise<Linked> {
-  const stored = parsePrLink(await deps.kv.get(prLinkKey(pull.number)));
-  if (stored !== null) {
-    const replay = stored.replay ?? (await deps.sentry.fetchIssue(stored.sentryIssueId)).replay;
+async function linkFor(
+  deps: VerifyDeps,
+  existing: VerifyRecord | null,
+  pull: TrackedPull,
+  prefetched: PrLink | null,
+): Promise<LinkOutcome> {
+  if (existing?.replay != null && existing.sentryIssueId != null) {
     return {
-      sentryIssueId: stored.sentryIssueId,
-      githubIssueNumber: stored.githubIssueNumber,
-      testPath: stored.testPath,
-      replay,
+      kind: "ready",
+      sentryIssueId: existing.sentryIssueId,
+      githubIssueNumber: existing.githubIssueNumber,
+      testPath: existing.testPath,
+      replay: existing.replay,
     };
+  }
+  return resolveLink(deps, pull, prefetched);
+}
+
+async function resolveLink(deps: VerifyDeps, pull: TrackedPull, stored: PrLink | null): Promise<LinkOutcome> {
+  if (stored !== null) {
+    return outcomeFromIssue(deps, stored.sentryIssueId, stored.githubIssueNumber, stored.testPath, stored.replay);
   }
   const issueNumber = refsIssueNumber(pull.body) ?? refsIssueNumber(pull.title);
   if (issueNumber === null) {
-    return { sentryIssueId: null, githubIssueNumber: null, testPath: null, replay: null };
+    return { kind: "none", sentryIssueId: null, githubIssueNumber: null };
   }
   const issue = await deps.github.getIssue(issueNumber);
   const sentryIssueId = sentryIssueIdFromText(issue?.body ?? null);
   if (sentryIssueId === null) {
-    return { sentryIssueId: null, githubIssueNumber: issueNumber, testPath: null, replay: null };
+    return { kind: "not-sentry" };
   }
-  const snap = await deps.sentry.fetchIssue(sentryIssueId);
-  return { sentryIssueId, githubIssueNumber: issueNumber, testPath: null, replay: snap.replay };
+  return outcomeFromIssue(deps, sentryIssueId, issueNumber, null, null);
+}
+
+async function outcomeFromIssue(
+  deps: VerifyDeps,
+  sentryIssueId: string,
+  githubIssueNumber: number | null,
+  testPath: string | null,
+  replay: ReplaySpec | null,
+): Promise<LinkOutcome> {
+  if (replay === null) {
+    try {
+      replay = (await deps.sentry.fetchIssue(sentryIssueId)).replay;
+    } catch (error) {
+      if (isSentryNotFound(error)) {
+        return { kind: "missing", sentryIssueId, githubIssueNumber };
+      }
+      throw error;
+    }
+  }
+  if (replay === null) {
+    return { kind: "none", sentryIssueId, githubIssueNumber };
+  }
+  return { kind: "ready", sentryIssueId, githubIssueNumber, testPath, replay };
 }
 
 async function deployReady(deps: VerifyDeps, mergeSha: string, prodSha: string): Promise<boolean> {
@@ -394,12 +469,30 @@ async function save(deps: VerifyDeps, record: VerifyRecord): Promise<void> {
   await deps.kv.put(verifyKey(record.prNumber), verifyToJson(record));
 }
 
-function withLink(existing: VerifyRecord | null, pull: TrackedPull, linked: Linked): VerifyRecord {
+function withLink(existing: VerifyRecord | null, pull: TrackedPull, linked: ReadyLink): VerifyRecord {
   const base = existing ?? emptyRecord(pull);
   return {
     ...base,
-    sentryIssueId: base.sentryIssueId ?? linked.sentryIssueId,
-    githubIssueNumber: base.githubIssueNumber ?? linked.githubIssueNumber,
+    sentryIssueId: linked.sentryIssueId,
+    githubIssueNumber: linked.githubIssueNumber ?? base.githubIssueNumber,
+    testPath: linked.testPath ?? base.testPath,
+    replay: linked.replay,
+    mergeCommitSha: pull.mergeCommitSha,
+    mergedAt: pull.mergedAt,
+  };
+}
+
+function withIds(
+  existing: VerifyRecord | null,
+  pull: TrackedPull,
+  sentryIssueId: string | null,
+  githubIssueNumber: number | null,
+): VerifyRecord {
+  const base = existing ?? emptyRecord(pull);
+  return {
+    ...base,
+    sentryIssueId: sentryIssueId ?? base.sentryIssueId,
+    githubIssueNumber: githubIssueNumber ?? base.githubIssueNumber,
     mergeCommitSha: pull.mergeCommitSha,
     mergedAt: pull.mergedAt,
   };
@@ -421,6 +514,8 @@ function emptyRecord(pull: TrackedPull): VerifyRecord {
     agentUrl: null,
     startedAt: null,
     failure: null,
+    testPath: null,
+    replay: null,
   };
 }
 
@@ -444,17 +539,31 @@ function successComment(record: VerifyRecord): string {
   ].join("\n");
 }
 
-function parseBrowserResult(result: string | undefined): { passed: boolean; summary: string } | null {
+export function parseBrowserResult(result: string | undefined): { passed: boolean; summary: string } | null {
   if (result === undefined) {
     return null;
   }
-  const start = result.indexOf("{");
-  const end = result.lastIndexOf("}");
-  if (start < 0 || end <= start) {
-    return null;
+  const text = result.trim();
+  for (let end = text.length; end > 0; end -= 1) {
+    if (text[end - 1] !== "}") {
+      continue;
+    }
+    for (let start = end - 1; start >= 0; start -= 1) {
+      if (text[start] !== "{") {
+        continue;
+      }
+      const parsed = browserVerdict(text.slice(start, end));
+      if (parsed !== null) {
+        return parsed;
+      }
+    }
   }
+  return null;
+}
+
+function browserVerdict(candidate: string): { passed: boolean; summary: string } | null {
   try {
-    const value: unknown = JSON.parse(result.slice(start, end + 1));
+    const value: unknown = JSON.parse(candidate);
     if (!isRecord(value) || typeof value.passed !== "boolean") {
       return null;
     }
@@ -464,7 +573,7 @@ function parseBrowserResult(result: string | undefined): { passed: boolean; summ
   }
 }
 
-function isTrackedPull(pull: ClosedPull): pull is TrackedPull {
+function isCandidate(pull: ClosedPull): pull is TrackedPull {
   if (!pull.merged || pull.mergedAt === null || pull.mergeCommitSha === null) {
     return false;
   }
@@ -474,14 +583,15 @@ function isTrackedPull(pull: ClosedPull): pull is TrackedPull {
   if (pull.baseRef !== "main" || pull.headRepoFullName !== GITHUB_FULL_NAME) {
     return false;
   }
-  return isRepro(pull);
+  return true;
 }
 
-function isRepro(pull: ClosedPull): boolean {
-  if (pull.labels.includes(REPRO_LABEL)) {
+function isReproPull(pull: ClosedPull, linked: boolean): boolean {
+  if (pull.labels.includes(REPRO_LABEL) || linked) {
     return true;
   }
-  return refsIssueNumber(pull.body) !== null || refsIssueNumber(pull.title) !== null;
+  const ref = pull.headRef ?? "";
+  return ref.startsWith("repro/") || ref.startsWith("cursor/repro-");
 }
 
 function isStale(pull: TrackedPull, existing: VerifyRecord | null, now: number): boolean {
@@ -492,19 +602,6 @@ function isStale(pull: TrackedPull, existing: VerifyRecord | null, now: number):
     return true;
   }
   return existing.phase === "resolved" || existing.phase === "failed";
-}
-
-function isPhase(value: string | null): value is VerifyPhase {
-  switch (value) {
-    case "waiting_deploy":
-    case "verifying_browser":
-    case "replayed":
-    case "resolved":
-    case "failed":
-      return true;
-    default:
-      return false;
-  }
 }
 
 function verifyToJson(record: VerifyRecord): JsonObject {
@@ -523,6 +620,8 @@ function verifyToJson(record: VerifyRecord): JsonObject {
     agentUrl: record.agentUrl,
     startedAt: record.startedAt,
     failure: record.failure,
+    testPath: record.testPath,
+    replay: record.replay === null ? null : replayToJson(record.replay),
   };
 }
 

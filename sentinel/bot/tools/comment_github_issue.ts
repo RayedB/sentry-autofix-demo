@@ -76,7 +76,7 @@ export default defineTool({
     const existing = parseIssueLink(await ctx.host.kv.get(issueLinkKey(input.issueNumber)));
     const sentryIssueId = existing?.sentryIssueId ?? sentryIssueIdFromContinuation(ctx.session.continuationKey);
     const fromAgent = input.replay == null ? null : parseAgentReplay(input.replay);
-    const replay = fromAgent ?? existing?.replay ?? null;
+    const replay = existing?.replay ?? fromAgent ?? null;
     const testPath = input.testPath !== undefined && isSafeTestPath(input.testPath) ? input.testPath : null;
     if (sentryIssueId !== null) {
       await ctx.host.kv.put(

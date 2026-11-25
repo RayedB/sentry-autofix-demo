@@ -32,16 +32,14 @@ function redact(value: unknown): unknown {
   return value;
 }
 
-function capBody(value: unknown): unknown {
+function capBody(value: unknown): string | { truncated: true } {
   try {
     const serialized = JSON.stringify(value);
-    if (serialized === undefined) {
+    if (serialized === undefined || new TextEncoder().encode(serialized).length > MAX_BODY_BYTES) {
       return { truncated: true };
     }
-    if (new TextEncoder().encode(serialized).length > MAX_BODY_BYTES) {
-      return { truncated: true };
-    }
-    return value;
+    // A string is a Sentry normalization leaf. Nested objects become "[Array]" at normalizeDepth 3.
+    return serialized;
   } catch {
     return { truncated: true };
   }

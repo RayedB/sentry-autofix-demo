@@ -1,9 +1,25 @@
 import type { JsonObject } from "@grok/agent-sdk";
+import * as z from "zod/v4";
 import { GITHUB_OWNER, GITHUB_REPO } from "./github.js";
-import { isRecord, readNumber, readString } from "./json.js";
 import { isSafeTestPath, parseAgentReplay, replayToJson, type ReplaySpec } from "./replay.js";
 
 const ISSUE_ID = /^[0-9]{1,32}$/;
+const issueId = z.string().regex(ISSUE_ID);
+const positive = z.number().int().positive();
+const issueLinkSchema = z.object({
+  sentryIssueId: issueId,
+  githubIssueNumber: positive,
+  replay: z.unknown().optional().nullable(),
+});
+const prLinkSchema = issueLinkSchema.extend({
+  prNumber: positive,
+  testPath: z.string().optional().nullable(),
+});
+const memorySchema = z.object({
+  issueId,
+  acceptedAt: z.string().min(1),
+  replay: z.unknown().optional().nullable(),
+});
 const REFS = /(?:^|\s)Refs\s+#(\d+)\b/;
 const SENTRY_ISSUE = /\/issues\/([0-9]{1,32})(?!\d)/;
 
@@ -87,46 +103,37 @@ export function sentryIssueIdFromText(text: string | null): string | null {
 }
 
 export function parseSentryIssueMemory(value: unknown): SentryIssueMemory | null {
-  if (!isRecord(value)) {
+  const parsed = memorySchema.safeParse(value);
+  if (!parsed.success) {
     return null;
   }
-  const issueId = readString(value, "issueId");
-  const acceptedAt = readString(value, "acceptedAt");
-  if (issueId === null || !ISSUE_ID.test(issueId) || acceptedAt === null) {
-    return null;
-  }
-  return { issueId, acceptedAt, replay: optionalReplay(value.replay) };
+  return { issueId: parsed.data.issueId, acceptedAt: parsed.data.acceptedAt, replay: optionalReplay(parsed.data.replay) };
 }
 
 export function parseIssueLink(value: unknown): IssueLink | null {
-  if (!isRecord(value)) {
+  const parsed = issueLinkSchema.safeParse(value);
+  if (!parsed.success) {
     return null;
   }
-  const sentryIssueId = readString(value, "sentryIssueId");
-  const githubIssueNumber = positiveInt(readNumber(value, "githubIssueNumber"));
-  if (sentryIssueId === null || !ISSUE_ID.test(sentryIssueId) || githubIssueNumber === null) {
-    return null;
-  }
-  return { sentryIssueId, githubIssueNumber, replay: optionalReplay(value.replay) };
+  return {
+    sentryIssueId: parsed.data.sentryIssueId,
+    githubIssueNumber: parsed.data.githubIssueNumber,
+    replay: optionalReplay(parsed.data.replay),
+  };
 }
 
 export function parsePrLink(value: unknown): PrLink | null {
-  if (!isRecord(value)) {
+  const parsed = prLinkSchema.safeParse(value);
+  if (!parsed.success) {
     return null;
   }
-  const sentryIssueId = readString(value, "sentryIssueId");
-  const githubIssueNumber = positiveInt(readNumber(value, "githubIssueNumber"));
-  const prNumber = positiveInt(readNumber(value, "prNumber"));
-  if (sentryIssueId === null || !ISSUE_ID.test(sentryIssueId) || githubIssueNumber === null || prNumber === null) {
-    return null;
-  }
-  const testPath = readString(value, "testPath");
+  const testPath = parsed.data.testPath;
   return {
-    sentryIssueId,
-    githubIssueNumber,
-    prNumber,
-    testPath: testPath !== null && isSafeTestPath(testPath) ? testPath : null,
-    replay: optionalReplay(value.replay),
+    sentryIssueId: parsed.data.sentryIssueId,
+    githubIssueNumber: parsed.data.githubIssueNumber,
+    prNumber: parsed.data.prNumber,
+    testPath: testPath != null && isSafeTestPath(testPath) ? testPath : null,
+    replay: optionalReplay(parsed.data.replay),
   };
 }
 
@@ -148,16 +155,16 @@ export function prLinkJson(link: PrLink): JsonObject {
   };
 }
 
+function positiveInt(value: number): number | null {
+  if (!Number.isInteger(value) || value <= 0) {
+    return null;
+  }
+  return value;
+}
+
 function optionalReplay(value: unknown): ReplaySpec | null {
   if (value === undefined || value === null) {
     return null;
   }
   return parseAgentReplay(value);
-}
-
-function positiveInt(value: number | null): number | null {
-  if (value === null || !Number.isInteger(value) || value <= 0) {
-    return null;
-  }
-  return value;
 }
